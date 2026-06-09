@@ -106,3 +106,15 @@ If a command above is wrong for your environment, fix `pyproject.toml`,
 
 Per-machine notes that shouldn't be committed go in `CLAUDE.local.md` or
 `AGENTS.local.md` (gitignored). Do not promote them into this file.
+
+<!-- graitools-only:start — fork-only, do NOT upstream to GridTools/gt4py -->
+
+## Experimental design proposals (graitools fork only)
+
+Drop design ideas / proposals under
+[`graitools/proposals/`](graitools/proposals/). Read
+[`graitools/AGENTS.md`](graitools/AGENTS.md) before drafting one (cross-check
+existing proposals first). This section and everything under `graitools/` are
+fork-only and must never be included in a PR to GridTools/gt4py.
+
+<!-- graitools-only:end -->

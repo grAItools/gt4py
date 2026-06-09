@@ -1,0 +1,24 @@
+# Fork-only: guards upstream-staging branches against carrying graitools/
+# content into GridTools/gt4py. Not for upstreaming. Triggers on `upstream/**`
+# branches — adjust if your upstream-contribution workflow differs.
+name: fork-boundary
+
+on:
+  push:
+    branches: ["upstream/**"]
+  pull_request:
+    branches: ["upstream/**"]
+
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch GridTools/gt4py main as baseline
+        run: |
+          git remote add gridtools https://github.com/GridTools/gt4py.git || true
+          git fetch --no-tags gridtools main
+      - name: Preflight upstream contribution
+        run: bash graitools/scripts/check-fork-boundary.sh gridtools/main HEAD
