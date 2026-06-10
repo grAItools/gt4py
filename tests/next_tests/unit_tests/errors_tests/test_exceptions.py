@@ -57,8 +57,8 @@ def test_str_snippet(loc_snippet, message):
         [
             f"{message}",
             '  File ".*", line.*',
-            "        # This very line of comment should be shown in the snippet.",
-            r"                  \^\^\^\^\^\^\^\^\^\^\^\^\^\^",
+            r"\s+\d+ \|     # This very line of comment should be shown in the snippet\.",
+            r"\s+\| {15}\^{14}",
         ]
     )
     s = str(errors.DSLError(loc_snippet, message))

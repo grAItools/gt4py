@@ -407,7 +407,13 @@ class FieldOperatorParser(DialectParser[foast.FunctionDefinition]):
 
     def visit_BoolOp(self, node: ast.BoolOp, **kwargs: Any) -> None:
         raise errors.UnsupportedPythonFeatureError(
-            self.get_location(node), "logical operators `and`, `or`"
+            self.get_location(node),
+            "logical operators `and`, `or`",
+            notes=[
+                "`and` and `or` operate on whole truth values, but fields contain "
+                "one boolean per grid point."
+            ],
+            hints=["Use the element-wise operators '&' and '|' instead."],
         )
 
     def visit_IfExp(self, node: ast.IfExp, **kwargs: Any) -> foast.TernaryExpr:

@@ -20,6 +20,7 @@ from gt4py.next.ffront import (
     fbuiltins,
     type_specifications as ts_ffront,
 )
+from gt4py.next.ffront.ast_passes import single_static_assign as ssa
 from gt4py.next.ffront.foast_passes import utils as foast_utils
 from gt4py.next.iterator import builtins
 from gt4py.next.type_system import type_info, type_specifications as ts, type_translation
@@ -282,7 +283,12 @@ class FieldOperatorTypeDeduction(traits.VisitorWithSymbolTableTrait, NodeTransla
     def visit_Name(self, node: foast.Name, **kwargs: Any) -> foast.Name:
         symtable = kwargs["symtable"]
         if node.id not in symtable or symtable[node.id].type is None:
-            raise errors.DSLError(node.location, f"Undeclared symbol '{node.id}'.")
+            defined_names = {
+                ssa.original_name(name) for name, sym in symtable.items() if sym.type is not None
+            }
+            raise errors.UndefinedSymbolError(
+                node.location, ssa.original_name(node.id), candidates=defined_names
+            )
 
         symbol = symtable[node.id]
         return foast.Name(id=node.id, type=symbol.type, location=node.location)
@@ -612,9 +618,23 @@ class FieldOperatorTypeDeduction(traits.VisitorWithSymbolTableTrait, NodeTransla
             is_compatible = (
                 type_info.is_logical if node.op in logical_ops else type_info.is_arithmetic
             )
-            for arg in (left, right):
+            requirement = "logical" if node.op in logical_ops else "arithmetic"
+            for arg, other in ((left, right), (right, left)):
                 if not is_compatible(arg.type):
-                    raise errors.DSLError(arg.location, err_msg)
+                    hints = []
+                    if requirement == "arithmetic" and type_info.is_logical(arg.type):
+                        hints = [
+                            "To select values based on a boolean mask, use 'where(mask, a, b)'. "
+                            "To compute with a boolean field, convert it explicitly, "
+                            "e.g. 'astype(mask, int32)'."
+                        ]
+                    raise errors.DSLError(
+                        arg.location,
+                        err_msg,
+                        label=f"'{node.op}' expects {requirement} operands, but this has type '{arg.type}'",
+                        related=[(other.location, f"the other operand has type '{other.type}'")],
+                        hints=hints,
+                    )
 
             if node.op == dialect_ast_enums.BinaryOperator.POW:
                 return left.type
@@ -634,6 +654,15 @@ class FieldOperatorTypeDeduction(traits.VisitorWithSymbolTableTrait, NodeTransla
                     node.location,
                     f"Could not promote '{left.type}' and '{right.type}' to common type"
                     f" in call to '{node.op}'.",
+                    related=[
+                        (left.location, f"this operand has type '{left.type}'"),
+                        (right.location, f"this operand has type '{right.type}'"),
+                    ],
+                    notes=["GT4Py does not implicitly convert between datatypes."],
+                    hints=[
+                        "Convert one operand explicitly, e.g. 'astype(<expr>, float64)', "
+                        "or make the datatypes of the inputs match."
+                    ],
                 ) from ex
         elif isinstance(left.type, ts.DomainType) and isinstance(right.type, ts.DomainType):
             if node.op not in logical_ops:
@@ -654,6 +683,15 @@ class FieldOperatorTypeDeduction(traits.VisitorWithSymbolTableTrait, NodeTransla
             raise errors.DSLError(
                 node.location,
                 f"Incompatible datatypes in operator '{node.op}': '{left.type}' and '{right.type}'.",
+                related=[
+                    (left.location, f"this operand has type '{left.type}'"),
+                    (right.location, f"this operand has type '{right.type}'"),
+                ],
+                notes=["GT4Py does not implicitly convert between datatypes."],
+                hints=[
+                    "Convert one operand explicitly, e.g. 'astype(<expr>, float64)', "
+                    "or make the datatypes of the inputs match."
+                ],
             )
 
     def visit_UnaryOp(self, node: foast.UnaryOp, **kwargs: Any) -> foast.UnaryOp:

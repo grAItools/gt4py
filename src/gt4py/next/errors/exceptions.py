@@ -19,8 +19,8 @@ in that submodule as opposed to being in this file.
 
 from __future__ import annotations
 
-import textwrap
-from typing import Any, Optional
+import difflib
+from typing import Any, ClassVar, Iterable, Optional, Sequence
 
 from gt4py.eve import SourceLocation
 from gt4py.next.errors import formatting
@@ -32,11 +32,56 @@ class GT4PyError(Exception):
         return self.args[0]
 
 
-class DSLError(GT4PyError):
-    location: Optional[SourceLocation]
+def _did_you_mean(name: str, candidates: Iterable[str]) -> list[str]:
+    """Produce a 'Did you mean ...?' hint if `name` closely matches any candidate."""
+    matches = difflib.get_close_matches(name, list(candidates), n=3, cutoff=0.6)
+    if not matches:
+        return []
+    return [f"Did you mean {' or '.join(f'{m!r}' for m in matches)}?"]
 
-    def __init__(self, location: Optional[SourceLocation], message: str) -> None:
+
+class DSLError(GT4PyError):
+    """
+    Error in user code of one of the GT4Py-embedded DSLs.
+
+    Besides the message and the primary source location, a diagnostic can carry
+    optional structured payload that the formatter renders for the user:
+
+    - ``label``: short text printed right after the carets, qualifying the
+      marked code (e.g. "this has type 'bool'").
+    - ``related``: further (location, message) pairs that contribute to the
+      error (e.g. the other operand of a type mismatch).
+    - ``notes``: factual background ("Note: ..."), explaining *why* this is an
+      error.
+    - ``hints``: actionable advice ("Hint: ..."), telling the user what to do
+      instead.
+    - ``code``: a stable, machine-readable identifier of the error category,
+      set per subclass; intended for searching documentation and for tooling.
+    """
+
+    code: ClassVar[Optional[str]] = None
+
+    location: Optional[SourceLocation]
+    label: Optional[str]
+    related: list[tuple[SourceLocation, str]]
+    notes: list[str]
+    hints: list[str]
+
+    def __init__(
+        self,
+        location: Optional[SourceLocation],
+        message: str,
+        *,
+        label: Optional[str] = None,
+        related: Sequence[tuple[SourceLocation, str]] = (),
+        notes: Sequence[str] = (),
+        hints: Sequence[str] = (),
+    ) -> None:
         self.location = location
+        self.label = label
+        self.related = list(related)
+        self.notes = list(notes)
+        self.hints = list(hints)
         super().__init__(message)
 
     def with_location(self, location: Optional[SourceLocation]) -> DSLError:
@@ -44,25 +89,53 @@ class DSLError(GT4PyError):
         return self
 
     def __str__(self) -> str:
-        if self.location:
-            loc_str = formatting.format_location(self.location, show_caret=True)
-            return f"{self.message}\n{textwrap.indent(loc_str, '  ')}"
-        return self.message
+        return formatting.format_diagnostic_parts(
+            self.message,
+            self.location,
+            label=self.label,
+            related=self.related,
+            notes=self.notes,
+            hints=self.hints,
+        )
 
 
 class UnsupportedPythonFeatureError(DSLError):
+    code = "unsupported-syntax"
+
     feature: str
 
-    def __init__(self, location: Optional[SourceLocation], feature: str) -> None:
-        super().__init__(location, f"Unsupported Python syntax: '{feature}'.")
+    def __init__(
+        self,
+        location: Optional[SourceLocation],
+        feature: str,
+        *,
+        notes: Sequence[str] = (),
+        hints: Sequence[str] = (),
+    ) -> None:
+        super().__init__(
+            location, f"Unsupported Python syntax: {feature}.", notes=notes, hints=hints
+        )
         self.feature = feature
 
 
 class UndefinedSymbolError(DSLError):
+    code = "undefined-symbol"
+
     sym_name: str
 
-    def __init__(self, location: Optional[SourceLocation], name: str) -> None:
-        super().__init__(location, f"Name '{name}' is not defined.")
+    def __init__(
+        self,
+        location: Optional[SourceLocation],
+        name: str,
+        *,
+        candidates: Iterable[str] = (),
+    ) -> None:
+        super().__init__(
+            location,
+            f"Undeclared symbol '{name}'.",
+            label="not defined at this point",
+            hints=_did_you_mean(name, candidates),
+        )
         self.sym_name = name
 
 
