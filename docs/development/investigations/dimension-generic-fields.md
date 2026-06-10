@@ -277,6 +277,31 @@ def __add__(cls: type[D], offset: float) -> Connectivity[Staggered[D], D]: ...
   old); a staggering shift is `for_relocation` + translation, carried by one
   fractional `offset` value (fractional part = grid change, integral part =
   translation).
+- **Dual-generic operators.** Operators like the C-grid average are generic
+  in the *dual*, not in `Staggered[X]`: for `X = I` the result lives on
+  `Staggered[I]`, for `X = Staggered[I]` on `I`. There is no type-level
+  `Dual[X]` in Python typing, but the same overload pair used for `__add__`
+  expresses it — one implementation body, two signature lines, generic at
+  every call site (prototype-verified, including `avg(avg(a))` round trips):
+
+  ```python
+  @overload
+  def avg(f: Field[Dims[Staggered[D]], float]) -> Field[Dims[D], float]: ...
+  @overload
+  def avg(f: Field[Dims[D], float]) -> Field[Dims[Staggered[D]], float]: ...
+  def avg(f):
+      (dim,) = f.dims
+      return f(dim - 1 / 2) + f(dim + 1 / 2)
+  ```
+
+  Note the asymmetry with the DSL: the *internal* type system is ours, so
+  there `Dual` can be a first-class type operator with the reduction rule
+  `Dual[Dual[X]] = X` (or equivalently: applied eagerly during binding,
+  since monomorphization makes `X` concrete before any result type is
+  needed). Only the mypy-facing layer needs the overload encoding; for a
+  dim-generic `avg` written *in* the DSL, the frontend types the body
+  symbolically (`f(X ± 1/2): Field[Dims[Dual[X]], T]`) and `dual()` is
+  computed at specialization time — no per-direction duplication anywhere.
 
 ### 4.3 Semantics (value level)
 

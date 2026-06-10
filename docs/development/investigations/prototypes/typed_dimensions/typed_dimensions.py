@@ -277,6 +277,11 @@ class Field(Protocol[DimsT, DT]):
     the ones spelled here would be generated (rank <= 3 in this prototype).
     """
 
+    @property
+    def dims(self) -> tuple[DimensionMeta, ...]:
+        """The dimension objects of this field (runtime view of `DimsT`)."""
+        ...
+
     # rank 1
     @overload
     def __call__(
@@ -332,6 +337,10 @@ class NdField(Generic[DimsT, DT]):
     def __post_init__(self) -> None:
         if len(self.dimensions) != self.ndarray.ndim:
             raise ValueError("Number of dimensions does not match array rank.")
+
+    @property
+    def dims(self) -> tuple[DimensionMeta, ...]:
+        return self.dimensions
 
     def __call__(self, conn: Connectivity[Any, Any]) -> NdField[Any, DT]:
         if conn.codomain not in self.dimensions:

@@ -17,7 +17,7 @@ This file is checked by `test_typed_dimensions.py`; it is never executed.
 
 from __future__ import annotations
 
-from typing import TypeAlias, TypeVar
+from typing import Any, TypeAlias, TypeVar, overload
 
 from typed_dimensions import Connectivity, Dimension, DimensionKind, Dims, Field, Staggered
 from typing_extensions import TypeVarTuple, Unpack, assert_type
@@ -125,6 +125,32 @@ def use_generic_operators(
     assert_type(double(uv), Field[Dims[I, J], float])
     assert_type(to_staggered(a, I), Field[Dims[Staggered[I]], float])
     assert_type(to_staggered(k, K), Field[Dims[Staggered[K]], float])
+
+
+# --- Dual-generic operators ---------------------------------------------------
+#
+# `avg` maps a field to its *dual* grid: I -> Staggered[I], but also
+# Staggered[I] -> I. Python typing has no type-level function `Dual[X]`, yet
+# the same overload pair that types `DimensionMeta.__add__` expresses it:
+# one implementation body, two signature lines, generic at every call site.
+
+
+@overload
+def avg(f: Field[Dims[Staggered[DimT]], float]) -> Field[Dims[DimT], float]: ...
+@overload
+def avg(f: Field[Dims[DimT], float]) -> Field[Dims[Staggered[DimT]], float]: ...
+def avg(f: Field[Any, float]) -> Field[Any, float]:
+    # The body is dual-generic, so the dimension is only known as "the field's
+    # dimension"; recover it at runtime (`Any`: precision lives in the overloads).
+    dim: Any = f.dims[0]
+    return f(dim - 1 / 2) + f(dim + 1 / 2)
+
+
+def use_avg(a: Field[Dims[I], float], b: Field[Dims[Staggered[I]], float]) -> None:
+    assert_type(avg(a), Field[Dims[Staggered[I]], float])  # to the dual grid ...
+    assert_type(avg(b), Field[Dims[I], float])  # ... and from it
+    assert_type(avg(avg(a)), Field[Dims[I], float])  # round trip
+    assert_type(avg(avg(avg(a))), Field[Dims[Staggered[I]], float])
 
 
 # --- Vertical-only operators (kind-restricted by nominal typing) -------------

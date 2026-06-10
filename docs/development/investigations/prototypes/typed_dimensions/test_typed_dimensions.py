@@ -125,6 +125,34 @@ def test_staggering_roundtrip_identity():
     np.testing.assert_array_equal(back.ndarray, a.ndarray)
 
 
+def avg(f: NdField) -> NdField:
+    """Runtime twin of the dual-generic `avg` in `static_checks.py` (one body, both grids)."""
+    (dim,) = f.dims
+    return f(dim - 1 / 2) + f(dim + 1 / 2)
+
+
+def test_avg_to_staggered():
+    a = make_ifield([0.0, 1.0, 2.0, 3.0])
+    result = avg(a)
+    assert result.dimensions == (Staggered[I],)
+    # at staggered point i+1/2: a[i] + a[i+1] (periodic)
+    np.testing.assert_array_equal(result.ndarray, [1.0, 3.0, 5.0, 3.0])
+
+
+def test_avg_from_staggered():
+    g = NdField((Staggered[I],), np.asarray([0.0, 1.0, 2.0, 3.0]))
+    result = avg(g)
+    assert result.dimensions == (I,)
+    # at unstaggered point i: g[i-1] + g[i] (the staggered neighbors at i -+ 1/2)
+    np.testing.assert_array_equal(result.ndarray, [3.0, 1.0, 3.0, 5.0])
+
+
+def test_avg_roundtrip_dims():
+    a = make_ifield([0.0, 1.0, 2.0, 3.0])
+    assert avg(avg(a)).dimensions == (I,)
+    assert avg(avg(avg(a))).dimensions == (Staggered[I],)
+
+
 def test_c_grid_gradient():
     a = make_ifield([0.0, 1.0, 4.0, 9.0])
     grad = a(I + 1 / 2) - a(I - 1 / 2)  # grad[i+1/2] = a[i+1] - a[i]
