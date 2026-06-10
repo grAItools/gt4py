@@ -163,6 +163,31 @@ def canonicalize_type_hint(
     return canonical_type, args, tuple(extra_args)
 
 
+def _dimension_from_dims_arg(dim_hint: Any) -> common.Dimension:
+    """Translate one entry of a ``Dims[...]`` annotation to a (possibly generic) dimension."""
+    if isinstance(dim_hint, common.Dimension):
+        return dim_hint
+    # Note: the `Unpack` case must come first: on Python 3.10 the
+    # `typing_extensions.Unpack[...]` alias erroneously passes
+    # `isinstance(..., typing.TypeVar)`.
+    if xtyping.get_origin(dim_hint) is xtyping.Unpack and isinstance(
+        unpacked := xtyping.get_args(dim_hint)[0], xtyping.TypeVarTuple
+    ):
+        return ts.DimsVar(value=unpacked.__name__)
+    if isinstance(dim_hint, typing.TypeVar):
+        # Note: value-constrained dimension TypeVars cannot exist: `TypeVar` constraints
+        # must be types, while concrete dimensions today are *instances*. This restriction
+        # disappears with the dimensions-as-types redesign, see
+        # `docs/development/investigations/dimension-generic-fields.md`.
+        if dim_hint.__constraints__ or dim_hint.__bound__ is not common.Dimension:
+            raise ValueError(
+                f"Invalid dimension variable '{dim_hint}': only 'TypeVar(..., bound=Dimension)'"
+                " is supported in a field dimension list."
+            )
+        return ts.DimensionVar(value=dim_hint.__name__)
+    raise ValueError(f"Invalid field dimension definition '{dim_hint}'.")
+
+
 @eve_utils.optional_lru_cache(maxsize=None, typed=False)
 def from_type_hint(
     type_hint: Any,
@@ -228,9 +253,12 @@ def from_type_hint(
             )
             if isinstance(dim_arg, list):
                 for d in dim_arg:
-                    if not isinstance(d, common.Dimension):
-                        raise ValueError(f"Invalid field dimension definition '{d}'.")
-                    dims.append(d)
+                    dims.append(_dimension_from_dims_arg(d))
+                if sum(isinstance(d, ts.DimsVar) for d in dims) > 1:
+                    raise ValueError(
+                        f"At most one variadic dimension variable (TypeVarTuple) is allowed"
+                        f" in a field dimension list (got '{dim_arg}')."
+                    )
             else:
                 raise ValueError(f"Invalid field dimensions '{dim_arg}'.")
 

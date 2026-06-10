@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Final, Iterator, Optional, Sequence, TypeVar
 
 from gt4py.eve import (
@@ -131,6 +132,38 @@ class TypeVarType(DataType):
             )
 
 
+@dataclasses.dataclass(frozen=True)
+class DimensionVar(common.Dimension):
+    """
+    A dimension variable: a single unknown dimension in a generic signature.
+
+    Note (prototype, see `docs/development/investigations/dimension-generic-fields.md`):
+    contrary to `TypeVarType` this is deliberately *not* a `TypeSpec` but a
+    `common.Dimension` subclass, so it can appear inside `FieldType.dims` (and
+    every piece of code that merely carries dimensions along keeps working);
+    only code that requires concreteness must distinguish it via `isinstance`.
+    `value` holds the variable name (`TypeVar.__name__`); like `TypeVarType`,
+    identity is name-based and scoped to one operator signature.
+    """
+
+    def __str__(self) -> str:
+        return f"{self.value}!"
+
+
+@dataclasses.dataclass(frozen=True)
+class DimsVar(common.Dimension):
+    """
+    A *variadic* dimension variable: an unknown list of dimensions.
+
+    Represents a Python `TypeVarTuple` in a `Dims[...]` annotation (e.g.
+    ``Field[Dims[Unpack[Ds]], T]``); binds to zero or more concrete dimensions.
+    See `DimensionVar` for why this is a `common.Dimension` subclass.
+    """
+
+    def __str__(self) -> str:
+        return f"*{self.value}!"
+
+
 class ListType(DataType):
     """Represents a neighbor list in the ITIR representation.
 
@@ -155,6 +188,10 @@ class FieldType(DataType, CallableType):
     def _dims_validator(
         self, attribute: eve_datamodels.Attribute, dims: list[common.Dimension]
     ) -> None:
+        if any(isinstance(dim, (DimensionVar, DimsVar)) for dim in dims):
+            # canonical dimension order is only defined once all dimension
+            # variables are substituted
+            return
         common.check_dims(dims)
 
 

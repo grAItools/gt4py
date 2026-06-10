@@ -9,7 +9,7 @@
 import functools
 import types
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any, Literal, Sequence, Type, TypeGuard, TypeVar, cast, overload
+from typing import Any, Literal, Sequence, Type, TypeAlias, TypeGuard, TypeVar, cast, overload
 
 import numpy as np
 
@@ -74,8 +74,10 @@ def is_generic(symbol_type: ts.TypeSpec) -> bool:
     match symbol_type:
         case ts.DeferredType() | ts.TypeVarType():
             return True
-        case ts.FieldType(dtype=dtype):
-            return is_generic(dtype)
+        case ts.FieldType(dims=dims, dtype=dtype):
+            return is_generic(dtype) or any(
+                isinstance(dim, (ts.DimensionVar, ts.DimsVar)) for dim in dims
+            )
         case ts.ListType(element_type=element_type):
             return is_generic(element_type)
         case ts.TupleType(types=types) | ts.NamedCollectionType(types=types):
@@ -619,15 +621,24 @@ def is_concretizable(symbol_type: ts.TypeSpec, to_type: ts.TypeSpec) -> bool:
     return False
 
 
-def bind_type_vars(
-    params: Sequence[ts.TypeSpec], args: Sequence[ts.TypeSpec]
-) -> dict[str, ts.ScalarType]:
+#: What a type variable can be bound to: a dtype (`TypeVarType`), a single
+#: dimension (`DimensionVar`) or a list of dimensions (`DimsVar`).
+TypeVarBinding: TypeAlias = (
+    "dict[str, ts.ScalarType | common.Dimension | tuple[common.Dimension, ...]]"
+)
+
+
+def _is_concrete_dim(dim: common.Dimension) -> bool:
+    return not isinstance(dim, (ts.DimensionVar, ts.DimsVar))
+
+
+def bind_type_vars(params: Sequence[ts.TypeSpec], args: Sequence[ts.TypeSpec]) -> TypeVarBinding:
     """
     Compute a binding of all type variables in ``params`` by structurally matching ``args``.
 
     Concrete (non-generic) parts of the parameters are ignored here; mismatches in those are
     reported by the regular signature checks. A type variable position only binds if the
-    corresponding argument provides a concrete scalar dtype; the caller is responsible for
+    corresponding argument provides a concrete dtype/dimension; the caller is responsible for
     checking that no type variable remained unbound (if required).
 
     Raises:
@@ -642,8 +653,24 @@ def bind_type_vars(
     ... )
     >>> print(binding["T"])
     float64
+
+    >>> binding = bind_type_vars(
+    ...     [ts.FieldType(dims=[ts.DimsVar(value="Ds")], dtype=var.constraints[0])],
+    ...     [ts.FieldType(dims=[I], dtype=var.constraints[0])],
+    ... )
+    >>> binding["Ds"]
+    (Dimension(value='I', kind=<DimensionKind.HORIZONTAL: 'horizontal'>),)
     """
-    binding: dict[str, ts.ScalarType] = {}
+    binding: TypeVarBinding = {}
+
+    def bind_name(name: str, value: ts.ScalarType | common.Dimension | tuple) -> None:
+        if (previous := binding.get(name)) is not None and previous != value:
+            raise ValueError(
+                f"Type variable '{name}' is bound inconsistently:"
+                f" '{previous}' and '{value}' (all arguments using '{name}'"
+                " must agree)."
+            )
+        binding[name] = value
 
     def bind_var(var: ts.TypeVarType, dtype: ts.TypeSpec) -> None:
         if not isinstance(dtype, ts.ScalarType):
@@ -652,24 +679,49 @@ def bind_type_vars(
             raise ValueError(
                 f"'{dtype}' does not satisfy the constraints of type variable '{var}'."
             )
-        if (previous := binding.get(var.name)) is not None and previous != dtype:
+        bind_name(var.name, dtype)
+
+    def bind_dims(
+        param_dims: Sequence[common.Dimension], arg_dims: Sequence[common.Dimension]
+    ) -> None:
+        if not all(_is_concrete_dim(dim) for dim in arg_dims):
+            return  # no concrete dimensions available, leave unbound
+        variadic = [i for i, dim in enumerate(param_dims) if isinstance(dim, ts.DimsVar)]
+        if len(variadic) > 1:
             raise ValueError(
-                f"Type variable '{var.name}' is bound inconsistently:"
-                f" '{previous}' and '{dtype}' (all arguments using '{var.name}'"
-                " must have the same dtype)."
+                f"At most one variadic dimension variable is allowed per dimension list,"
+                f" got '{', '.join(str(param_dims[i]) for i in variadic)}'."
             )
-        binding[var.name] = dtype
+        if variadic:
+            (split,) = variadic
+            prefix, suffix = param_dims[:split], param_dims[split + 1 :]
+            if len(arg_dims) < len(prefix) + len(suffix):
+                return  # structural mismatch, reported by the signature checks
+            bound = arg_dims[len(prefix) : len(arg_dims) - len(suffix)]
+            bind_name(param_dims[split].value, tuple(bound))
+            pairs = [*zip(prefix, arg_dims), *zip(reversed(suffix), reversed(arg_dims))]
+        else:
+            if len(param_dims) != len(arg_dims):
+                return  # structural mismatch, reported by the signature checks
+            pairs = list(zip(param_dims, arg_dims))
+        for param_dim, arg_dim in pairs:
+            if isinstance(param_dim, ts.DimensionVar):
+                bind_name(param_dim.value, arg_dim)
 
     def bind(param: ts.TypeSpec, arg: ts.TypeSpec) -> None:
         match param:
             case ts.TypeVarType():
                 bind_var(param, arg)
-            case ts.FieldType(dtype=ts.TypeVarType() as var):
+            case ts.FieldType(dims=dims, dtype=dtype):
                 if isinstance(arg, ts.FieldType):
-                    bind_var(var, arg.dtype)
+                    if isinstance(dtype, ts.TypeVarType):
+                        bind_var(dtype, arg.dtype)
+                    bind_dims(dims, arg.dims)
                 elif isinstance(arg, ts.ScalarType):
                     # scalar arguments are promoted to zero-dimensional fields
-                    bind_var(var, arg)
+                    if isinstance(dtype, ts.TypeVarType):
+                        bind_var(dtype, arg)
+                    bind_dims(dims, [])
             case ts.ListType(element_type=element_type) if isinstance(arg, ts.ListType):
                 bind(element_type, arg.element_type)
             case ts.TupleType() | ts.NamedCollectionType() if isinstance(
@@ -683,9 +735,25 @@ def bind_type_vars(
     return binding
 
 
-def substitute_type_vars(
-    type_: ts.TypeSpec, binding: xtyping.Mapping[str, ts.ScalarType]
-) -> ts.TypeSpec:
+def _substitute_dims(
+    dims: Sequence[common.Dimension], binding: xtyping.Mapping[str, Any]
+) -> list[common.Dimension]:
+    new_dims: list[common.Dimension] = []
+    for dim in dims:
+        if isinstance(dim, ts.DimsVar) and dim.value in binding:
+            bound = binding[dim.value]
+            assert isinstance(bound, tuple)
+            new_dims.extend(bound)
+        elif isinstance(dim, ts.DimensionVar) and dim.value in binding:
+            bound = binding[dim.value]
+            assert isinstance(bound, common.Dimension)
+            new_dims.append(bound)
+        else:
+            new_dims.append(dim)
+    return new_dims
+
+
+def substitute_type_vars(type_: ts.TypeSpec, binding: xtyping.Mapping[str, Any]) -> ts.TypeSpec:
     """
     Replace all type variables in ``type_`` that are bound in ``binding``.
 
@@ -700,6 +768,14 @@ def substitute_type_vars(
     ...     )
     ... )
     Field[[I], float64]
+
+    >>> print(
+    ...     substitute_type_vars(
+    ...         ts.FieldType(dims=[ts.DimsVar(value="Ds")], dtype=var),
+    ...         {"T": ts.ScalarType(kind=ts.ScalarKind.FLOAT64), "Ds": (I,)},
+    ...     )
+    ... )
+    Field[[I], float64]
     """
     if not binding or not is_generic(type_):
         return type_
@@ -709,7 +785,7 @@ def substitute_type_vars(
         case ts.FieldType(dims=dims, dtype=dtype):
             new_dtype = substitute_type_vars(dtype, binding)
             assert isinstance(new_dtype, (ts.ScalarType, ts.ListType, ts.TypeVarType))
-            return ts.FieldType(dims=dims, dtype=new_dtype)
+            return ts.FieldType(dims=_substitute_dims(dims, binding), dtype=new_dtype)
         case ts.ListType(element_type=element_type, offset_type=offset_type):
             new_element_type = substitute_type_vars(element_type, binding)
             assert isinstance(new_element_type, ts.DataType)

@@ -6,7 +6,7 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Any, Mapping, TypeVar
+from typing import Any, TypeVar
 
 from gt4py.eve import NodeTranslator
 from gt4py.next.ffront import field_operator_ast as foast, type_specifications as ts_ffront
@@ -20,20 +20,20 @@ class SpecializeTypeVars(NodeTranslator):
     """
     Substitute bound type variables in the types of all nodes of a FOAST tree.
 
-    The binding maps type variable names to concrete scalar types, see
-    :func:`gt4py.next.type_system.type_info.bind_type_vars`. Unbound type variables
+    The binding maps type variable names to concrete scalar types or (lists of)
+    dimensions, see :func:`gt4py.next.type_system.type_info.bind_type_vars`. Unbound type variables
     are kept, such that the caller can decide whether a partial specialization is an
     error (e.g. using :func:`gt4py.next.type_system.type_info.is_generic`).
     """
 
-    binding: Mapping[str, ts.ScalarType]
+    binding: type_info.TypeVarBinding
 
-    def __init__(self, binding: Mapping[str, ts.ScalarType]):
+    def __init__(self, binding: type_info.TypeVarBinding):
         super().__init__()
         self.binding = binding
 
     @classmethod
-    def apply(cls, node: _NodeT, binding: Mapping[str, ts.ScalarType]) -> _NodeT:
+    def apply(cls, node: _NodeT, binding: type_info.TypeVarBinding) -> _NodeT:
         if not binding:
             return node
         return cls(binding).visit(node)
