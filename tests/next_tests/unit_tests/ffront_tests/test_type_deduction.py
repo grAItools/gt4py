@@ -8,6 +8,7 @@
 
 import re
 import dataclasses
+import typing
 from typing import NamedTuple, TypeAlias
 from collections.abc import Sequence
 
@@ -27,6 +28,7 @@ from gt4py.next import (
     int32,
     int64,
     neighbor_sum,
+    sin,
     where,
 )
 from gt4py.next.ffront.experimental import concat_where
@@ -798,3 +800,140 @@ def test_concat_where_wrong_structure_nested():
         match="Second and third argument to 'concat_where' must have the same tuple/collection structure",
     ):
         parsed = FieldOperatorParser.apply_to_function(testee)
+
+
+class TestGenericDtype:
+    """Field operators generic in the field dtype (value-constrained 'TypeVar's)."""
+
+    FloatT = typing.TypeVar("FloatT", float32, float64)
+    float_var = ts.TypeVarType(
+        name="FloatT",
+        constraints=(
+            ts.ScalarType(kind=ts.ScalarKind.FLOAT32),
+            ts.ScalarType(kind=ts.ScalarKind.FLOAT64),
+        ),
+    )
+
+    def test_generic_binop(self):
+        FloatT = self.FloatT
+
+        def generic_diff(
+            a: Field[[TDim], FloatT], b: Field[[TDim], FloatT]
+        ) -> Field[[TDim], FloatT]:
+            return a - b
+
+        parsed = FieldOperatorParser.apply_to_function(generic_diff)
+        assert parsed.type.returns == ts.FieldType(dims=[TDim], dtype=self.float_var)
+
+    def test_generic_scalar_param(self):
+        FloatT = self.FloatT
+
+        def generic_scale(a: Field[[TDim], FloatT], s: FloatT) -> Field[[TDim], FloatT]:
+            return a * s
+
+        parsed = FieldOperatorParser.apply_to_function(generic_scale)
+        assert parsed.type.returns == ts.FieldType(dims=[TDim], dtype=self.float_var)
+
+    def test_generic_comparison_yields_concrete_bool(self):
+        FloatT = self.FloatT
+
+        def generic_lt(a: Field[[TDim], FloatT], b: Field[[TDim], FloatT]) -> Field[[TDim], bool]:
+            return a < b
+
+        parsed = FieldOperatorParser.apply_to_function(generic_lt)
+        assert parsed.type.returns == ts.FieldType(
+            dims=[TDim], dtype=ts.ScalarType(kind=ts.ScalarKind.BOOL)
+        )
+
+    def test_generic_math_builtin(self):
+        FloatT = self.FloatT
+
+        def generic_sin(a: Field[[TDim], FloatT]) -> Field[[TDim], FloatT]:
+            return sin(a)
+
+        parsed = FieldOperatorParser.apply_to_function(generic_sin)
+        assert parsed.type.returns == ts.FieldType(dims=[TDim], dtype=self.float_var)
+
+    def test_generic_tuple_return(self):
+        FloatT = self.FloatT
+
+        def generic_tuple(
+            a: Field[[TDim], FloatT], b: Field[[TDim], FloatT]
+        ) -> tuple[Field[[TDim], FloatT], Field[[TDim], FloatT]]:
+            return a + b, a - b
+
+        parsed = FieldOperatorParser.apply_to_function(generic_tuple)
+        assert parsed.type.returns == ts.TupleType(
+            types=[ts.FieldType(dims=[TDim], dtype=self.float_var)] * 2
+        )
+
+    def test_mixing_with_concrete_dtype_error(self):
+        FloatT = self.FloatT
+
+        def mix(a: Field[[TDim], FloatT]) -> Field[[TDim], FloatT]:
+            return a * 2.0
+
+        with pytest.raises(errors.DSLError, match=r"Could not promote"):
+            _ = FieldOperatorParser.apply_to_function(mix)
+
+    def test_mixing_with_other_type_var_error(self):
+        FloatT = self.FloatT
+        OtherT = typing.TypeVar("OtherT", float32, float64)
+
+        def mix(a: Field[[TDim], FloatT], b: Field[[TDim], OtherT]) -> Field[[TDim], FloatT]:
+            return a + b
+
+        with pytest.raises(errors.DSLError, match=r"Could not promote"):
+            _ = FieldOperatorParser.apply_to_function(mix)
+
+    def test_unsupported_builtin_astype_error(self):
+        FloatT = self.FloatT
+
+        def unsupported(a: Field[[TDim], FloatT]):
+            return astype(a, float32)
+
+        with pytest.raises(
+            errors.DSLError, match=r"does not support arguments with a generic dtype"
+        ):
+            _ = FieldOperatorParser.apply_to_function(unsupported)
+
+    def test_unsupported_builtin_where_error(self):
+        FloatT = self.FloatT
+
+        def unsupported(a: Field[[TDim], FloatT]):
+            return where(a < a, a, a)
+
+        with pytest.raises(
+            errors.DSLError, match=r"does not support arguments with a generic dtype"
+        ):
+            _ = FieldOperatorParser.apply_to_function(unsupported)
+
+    def test_unsupported_builtin_broadcast_error(self):
+        FloatT = self.FloatT
+
+        def unsupported(a: Field[[TDim], FloatT]):
+            return broadcast(a, (TDim, SDim))
+
+        with pytest.raises(
+            errors.DSLError, match=r"does not support arguments with a generic dtype"
+        ):
+            _ = FieldOperatorParser.apply_to_function(unsupported)
+
+    def test_distinct_same_named_type_vars_error(self):
+        FloatT = self.FloatT
+        ShadowT = typing.TypeVar("FloatT", float32, float64)
+
+        def shadowed(a: Field[[TDim], FloatT], b: Field[[TDim], ShadowT]) -> Field[[TDim], FloatT]:
+            return a
+
+        with pytest.raises(errors.DSLError, match=r"same name"):
+            _ = FieldOperatorParser.apply_to_function(shadowed)
+
+    def test_unconstrained_type_var_error(self):
+        T = typing.TypeVar("T")
+
+        def unconstrained(a: Field[[TDim], T]) -> Field[[TDim], T]:
+            return a
+
+        with pytest.raises(ValueError, match=r"value-constrained"):
+            _ = FieldOperatorParser.apply_to_function(unconstrained)

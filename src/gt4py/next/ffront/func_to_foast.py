@@ -162,12 +162,39 @@ class FieldOperatorParser(DialectParser[foast.FunctionDefinition]):
         return ast
 
     @classmethod
+    def _validate_type_var_names_unique(
+        cls, foast_node: foast.LocatedNode, annotations: dict[str, Any]
+    ) -> None:
+        """Check that all equally named type variables in a signature are the same object."""
+        type_vars_by_name: dict[str, typing.TypeVar] = {}
+
+        def collect(hint: Any) -> None:
+            if isinstance(hint, typing.TypeVar):
+                if (previous := type_vars_by_name.get(hint.__name__)) is not None:
+                    if previous is not hint:
+                        raise errors.DSLTypeError(
+                            foast_node.location,
+                            f"Multiple distinct type variables with the same name"
+                            f" '{hint.__name__}' are used in the signature; all"
+                            " occurrences of a type variable name must refer to the"
+                            " same 'TypeVar' object.",
+                        )
+                else:
+                    type_vars_by_name[hint.__name__] = hint
+            for arg in typing.get_args(hint):
+                collect(arg)
+
+        for hint in annotations.values():
+            collect(hint)
+
+    @classmethod
     def _postprocess_dialect_ast(
         cls,
         foast_node: foast.FunctionDefinition | foast.FieldOperator,
         closure_vars: dict[str, Any],
         annotations: dict[str, Any],
     ) -> foast.FunctionDefinition:
+        cls._validate_type_var_names_unique(foast_node, annotations)
         foast_node = ClosureVarFolding.apply(foast_node, closure_vars)
         foast_node = DeadClosureVarElimination.apply(foast_node)
         foast_node = ClosureVarTypeDeduction.apply(foast_node, closure_vars)

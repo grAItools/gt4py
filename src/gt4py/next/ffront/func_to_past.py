@@ -34,7 +34,7 @@ from gt4py.next.ffront.stages import (
     PASTProgramDef,
 )
 from gt4py.next.otf import toolchain, workflow
-from gt4py.next.type_system import type_specifications as ts, type_translation
+from gt4py.next.type_system import type_info, type_specifications as ts, type_translation
 
 
 def func_to_past(inp: DSLProgramDef) -> PASTProgramDef:
@@ -139,6 +139,12 @@ class ProgramParser(DialectParser[past.Program]):
         new_type = type_translation.from_type_hint(annotation)
         if not isinstance(new_type, ts.DataType):
             raise errors.InvalidParameterAnnotationError(loc, node.arg, new_type)
+        if type_info.is_generic(new_type):
+            raise errors.DSLTypeError(
+                loc,
+                f"Parameter '{node.arg}' has a generic dtype (type variable): generic"
+                " programs are not supported yet (only generic field operators are).",
+            )
         return past.DataSymbol(id=node.arg, location=loc, type=new_type)
 
     def visit_Expr(self, node: ast.Expr) -> past.LocatedNode:

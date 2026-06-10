@@ -396,7 +396,8 @@ class CompiledProgramsPool(Generic[ffront_stages.DSLDefinitionT]):
             # expensive type deduction for all arguments and not include it in the key.
             if enable_jit:
                 warnings.warn(
-                    "Calling generic programs / direct calls to scan operators are not optimized. "
+                    "Calling generic programs / operators (e.g. operators with generic dtype "
+                    "or direct calls to scan operators) is not optimized. "
                     "Consider calling a specialized version instead.",
                     stacklevel=3,
                 )

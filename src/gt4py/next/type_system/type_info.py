@@ -730,8 +730,7 @@ def substitute_type_vars(
                     for name, t in type_.pos_or_kw_args.items()
                 },
                 kw_only_args={
-                    name: substitute_type_vars(t, binding)
-                    for name, t in type_.kw_only_args.items()
+                    name: substitute_type_vars(t, binding) for name, t in type_.kw_only_args.items()
                 },
                 returns=substitute_type_vars(type_.returns, binding),
             )
@@ -774,19 +773,13 @@ def promote(
                     " not with other dtypes."
                 )
             raise ValueError("Could not promote scalars of different dtype (not implemented).")
-        if not all(
-            type_.shape is None for type_ in types if isinstance(type_, ts.ScalarType)
-        ):
+        if not all(type_.shape is None for type_ in types if isinstance(type_, ts.ScalarType)):
             raise NotImplementedError("Shape promotion not implemented.")
         return types[0]
-    elif all(
-        isinstance(type_, (ts.ScalarType, ts.FieldType, ts.TypeVarType)) for type_ in types
-    ):
+    elif all(isinstance(type_, (ts.ScalarType, ts.FieldType, ts.TypeVarType)) for type_ in types):
         dims = common.promote_dims(*(extract_dims(type_) for type_ in types))
         extracted_dtypes = [extract_dtype(type_) for type_ in types]
-        assert all(
-            isinstance(dtype, (ts.ScalarType, ts.TypeVarType)) for dtype in extracted_dtypes
-        )
+        assert all(isinstance(dtype, (ts.ScalarType, ts.TypeVarType)) for dtype in extracted_dtypes)
         dtype = cast(  # type variables promote like scalars (only with themselves)
             ts.ScalarType | ts.TypeVarType,
             promote(*extracted_dtypes),  # type: ignore[arg-type] # checked above

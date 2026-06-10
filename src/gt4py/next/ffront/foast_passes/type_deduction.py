@@ -53,6 +53,9 @@ def with_altered_scalar_kind(
         )
     elif isinstance(type_spec, ts.ScalarType):
         return ts.ScalarType(kind=new_scalar_kind, shape=type_spec.shape)
+    elif isinstance(type_spec, ts.TypeVarType):
+        # altering the scalar kind of a type variable resolves it to a concrete scalar type
+        return ts.ScalarType(kind=new_scalar_kind)
     else:
         raise ValueError(f"Expected field or scalar type, got '{type_spec}'.")
 
@@ -248,6 +251,12 @@ class FieldOperatorTypeDeduction(traits.VisitorWithSymbolTableTrait, NodeTransla
             )
         new_definition = self.visit(node.definition, **kwargs)
         new_def_type = new_definition.type
+        if type_info.is_generic(new_def_type) or type_info.is_generic(new_init.type):
+            raise errors.DSLError(
+                node.location,
+                f"Scan operator '{node.id}' with a generic dtype (type variable) is not"
+                " supported yet.",
+            )
         if not new_def_type.pos_or_kw_args:
             raise errors.DSLError(
                 node.location,
@@ -606,8 +615,8 @@ class FieldOperatorTypeDeduction(traits.VisitorWithSymbolTableTrait, NodeTransla
 
         err_msg = f"Unsupported operand type(s) for {node.op}: '{left.type}' and '{right.type}'."
 
-        if isinstance(left.type, (ts.ScalarType, ts.FieldType)) and isinstance(
-            right.type, (ts.ScalarType, ts.FieldType)
+        if isinstance(left.type, (ts.ScalarType, ts.FieldType, ts.TypeVarType)) and isinstance(
+            right.type, (ts.ScalarType, ts.FieldType, ts.TypeVarType)
         ):
             is_compatible = (
                 type_info.is_logical if node.op in logical_ops else type_info.is_arithmetic
@@ -720,6 +729,39 @@ class FieldOperatorTypeDeduction(traits.VisitorWithSymbolTableTrait, NodeTransla
                 f"Expression of type '{new_func.type}' is not callable, must be a 'Function', 'FieldOperator', 'ScanOperator' or 'Field'.",
             )
 
+        has_generic_args = any(
+            type_info.is_generic(t)
+            for t in (*arg_types, *kwarg_types.values())
+            # only data arguments are relevant here; e.g. the type constructor argument
+            #  of 'astype' legitimately contains a 'DeferredType'
+            if isinstance(t, ts.DataType)
+        )
+        if has_generic_args and (
+            isinstance(new_func, foast.Name)
+            and isinstance(func_type, ts.FunctionType)
+            and new_func.id
+            in (fbuiltins.FUN_BUILTIN_NAMES + experimental.EXPERIMENTAL_FUN_BUILTIN_NAMES)
+            # math builtins support generic dtypes as their type deduction only relies on
+            #  type-variable-aware predicates and promotion
+            and new_func.id not in fbuiltins.MATH_BUILTIN_NAMES
+        ):
+            # TODO(havogt): audit the type deduction of each builtin for generic dtypes and
+            #  lift this restriction incrementally (math builtins are already supported as
+            #  they only rely on type-variable-aware predicates and promotion).
+            raise errors.DSLError(
+                node.location,
+                f"Builtin '{new_func.id}' does not support arguments with a generic dtype"
+                " (type variable) yet.",
+            )
+        if isinstance(func_type, (ts_ffront.FieldOperatorType, ts_ffront.ScanOperatorType)) and (
+            has_generic_args or type_info.is_generic(func_type)
+        ):
+            raise errors.DSLError(
+                node.location,
+                "Calling an operator with arguments of generic dtype (type variable) or"
+                " calling a generic operator from another operator is not supported yet.",
+            )
+
         # ensure signature is valid
         try:
             type_info.accepts_args(
@@ -794,7 +836,7 @@ class FieldOperatorTypeDeduction(traits.VisitorWithSymbolTableTrait, NodeTransla
             print(f"Warning: return type of '{func_name}' might be inconsistent (not implemented).")
 
         # deduce return type
-        return_type: Optional[ts.FieldType | ts.ScalarType] = None
+        return_type: Optional[ts.FieldType | ts.ScalarType | ts.TypeVarType] = None
         if (
             func_name
             in fbuiltins.UNARY_MATH_NUMBER_BUILTIN_NAMES + fbuiltins.UNARY_MATH_FP_BUILTIN_NAMES

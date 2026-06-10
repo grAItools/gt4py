@@ -464,3 +464,46 @@ def test_unsafe_cast_to(value, type_, expected):
     result = type_translation.unsafe_cast_to(value, type_)
     assert result == expected
     assert type(result) is type(expected)
+
+
+class TestTypeVarTranslation:
+    FloatT = typing.TypeVar("FloatT", gtx.float32, gtx.float64)
+
+    def test_value_constrained_type_var(self):
+        assert type_translation.from_type_hint(self.FloatT) == ts.TypeVarType(
+            name="FloatT",
+            constraints=(
+                ts.ScalarType(kind=ts.ScalarKind.FLOAT32),
+                ts.ScalarType(kind=ts.ScalarKind.FLOAT64),
+            ),
+        )
+
+    def test_generic_field(self):
+        IDim = common.Dimension("IDim")
+        assert type_translation.from_type_hint(
+            gtx.Field[gtx.Dims[IDim], self.FloatT]
+        ) == ts.FieldType(
+            dims=[IDim],
+            dtype=ts.TypeVarType(
+                name="FloatT",
+                constraints=(
+                    ts.ScalarType(kind=ts.ScalarKind.FLOAT32),
+                    ts.ScalarType(kind=ts.ScalarKind.FLOAT64),
+                ),
+            ),
+        )
+
+    def test_unconstrained_type_var(self):
+        T = typing.TypeVar("T")
+        with pytest.raises(ValueError, match="value-constrained"):
+            type_translation.from_type_hint(T)
+
+    def test_bound_only_type_var(self):
+        T = typing.TypeVar("T", bound=float)
+        with pytest.raises(ValueError, match="value-constrained"):
+            type_translation.from_type_hint(T)
+
+    def test_non_scalar_constraints(self):
+        T = typing.TypeVar("T", str, bytes)
+        with pytest.raises(ValueError, match="must be scalar types"):
+            type_translation.from_type_hint(T)

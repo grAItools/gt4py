@@ -14,6 +14,7 @@ from typing import Generic
 from gt4py._core import definitions as core_defs
 from gt4py.next import custom_layout_allocators as next_allocators
 from gt4py.next.ffront import (
+    foast_specialize,
     foast_to_gtir,
     foast_to_past,
     func_to_foast,
@@ -71,6 +72,10 @@ class Transforms(
         ffront_stages.ConcreteDSLFieldOperatorDef, ffront_stages.ConcreteFOASTOperatorDef
     ] = dataclasses.field(default_factory=func_to_foast.adapted_func_to_foast_factory)
 
+    foast_specialize: workflow.Workflow[
+        ffront_stages.ConcreteFOASTOperatorDef, ffront_stages.ConcreteFOASTOperatorDef
+    ] = dataclasses.field(default_factory=foast_specialize.foast_specialize_factory)
+
     func_to_past: workflow.Workflow[
         ffront_stages.ConcreteDSLProgramDef, ffront_stages.ConcretePASTProgramDef
     ] = dataclasses.field(default_factory=func_to_past.adapted_func_to_past_factory)
@@ -104,6 +109,7 @@ class Transforms(
                 steps.extend(
                     [
                         "func_to_foast",
+                        "foast_specialize",
                         "field_view_op_to_prog",
                         "past_lint",
                         "field_view_prog_args_transform",
@@ -113,6 +119,7 @@ class Transforms(
             case ffront_stages.FOASTOperatorDef():
                 steps.extend(
                     [
+                        "foast_specialize",
                         "field_view_op_to_prog",
                         "past_lint",
                         "field_view_prog_args_transform",

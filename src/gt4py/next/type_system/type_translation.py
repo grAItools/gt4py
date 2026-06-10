@@ -177,6 +177,35 @@ def from_type_hint(
         type_hint, globalns=globalns, localns=localns
     )
 
+    if isinstance(canonical_type, typing.TypeVar):
+        if not canonical_type.__constraints__:
+            raise ValueError(
+                f"Unconstrained or bound-only type variable '{canonical_type}' is not"
+                " supported, only value-constrained type variables are"
+                " (e.g. \"TypeVar('T', float32, float64)\")."
+            )
+        try:
+            constraints = tuple(
+                from_type_hint_same_ns(constraint) for constraint in canonical_type.__constraints__
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"All constraints of type variable '{canonical_type}' must be scalar types"
+                f" (got '{canonical_type.__constraints__}')."
+            ) from error
+        if not all(
+            isinstance(constraint, ts.ScalarType) and constraint.kind != ts.ScalarKind.STRING
+            for constraint in constraints
+        ):
+            raise ValueError(
+                f"All constraints of type variable '{canonical_type}' must be scalar types"
+                f" (got '{', '.join(str(c) for c in constraints)}')."
+            )
+        return ts.TypeVarType(
+            name=canonical_type.__name__,
+            constraints=typing.cast(tuple[ts.ScalarType, ...], constraints),
+        )
+
     match canonical_type:
         case builtins.tuple:
             if not args:
@@ -208,11 +237,15 @@ def from_type_hint(
             try:
                 dtype = from_type_hint_same_ns(dtype_arg)
             except ValueError as error:
+                if isinstance(dtype_arg, typing.TypeVar):
+                    raise  # the specific type variable error message is more helpful
                 raise ValueError(
                     f"Field dtype argument must be a scalar type (got '{dtype_arg}')."
                 ) from error
-            if not isinstance(dtype, ts.ScalarType) or dtype.kind == ts.ScalarKind.STRING:
-                raise ValueError("Field dtype argument must be a scalar type (got '{dtype}').")
+            if not isinstance(dtype, (ts.ScalarType, ts.TypeVarType)) or (
+                isinstance(dtype, ts.ScalarType) and dtype.kind == ts.ScalarKind.STRING
+            ):
+                raise ValueError(f"Field dtype argument must be a scalar type (got '{dtype}').")
             return ts.FieldType(dims=dims, dtype=dtype)
 
         case collections.abc.Callable:
