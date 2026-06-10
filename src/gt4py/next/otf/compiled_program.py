@@ -461,17 +461,11 @@ class CompiledProgramsPool(Generic[ffront_stages.DSLDefinitionT]):
 
         Right now this is only the case for scan operators.
         """
-        # TODO(tehrengruber): This concept does not exist elsewhere and is not properly reflected
-        #  in the type system. For now we just use `DeferredType` to communicate between
-        #  here and `type_info.type_in_program_context`.
-        return any(
-            isinstance(t, ts.DeferredType)
-            for t in itertools.chain(
-                self.program_type.definition.pos_only_args,
-                self.program_type.definition.pos_or_kw_args.values(),
-                self.program_type.definition.kw_only_args.values(),
-            )
-        )
+        # Note: For scan operators the genericity is communicated via `DeferredType` parameters
+        #  created in `type_info.type_in_program_context`. See
+        #  `docs/development/investigations/dtype-generic-fields.md` for the plan to make
+        #  this concept first-class in the type system.
+        return type_info.is_generic(self.program_type.definition)
 
     @functools.cached_property
     def _args_canonicalizer(self) -> Callable[..., tuple[tuple, dict[str, Any]]]:
