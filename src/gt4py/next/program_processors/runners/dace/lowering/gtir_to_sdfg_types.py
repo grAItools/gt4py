@@ -86,6 +86,8 @@ class FieldopData:
                 (dim, dace.symbolic.SymExpr(0) if self.origin is None else self.origin[i])
                 for i, dim in enumerate(self.gt_type.dims)
             ]
+            # only concrete (specialized) types reach the lowering
+            assert not isinstance(self.gt_type.dtype, ts.TypeVarType)
             return gtir_dataflow.IteratorExpr(
                 self.dc_node, self.gt_type.dtype, field_origin, it_indices
             )

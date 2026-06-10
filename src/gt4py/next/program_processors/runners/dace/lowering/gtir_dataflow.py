@@ -100,6 +100,8 @@ class MemletExpr:
 
     @property
     def gt_dtype(self) -> ts.ScalarType | ts.ListType:
+        # only concrete (specialized) types reach the lowering
+        assert not isinstance(self.gt_field.dtype, ts.TypeVarType)
         return self.gt_field.dtype
 
     def __post_init__(self) -> None:

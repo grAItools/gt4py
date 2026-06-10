@@ -181,10 +181,17 @@ def _transform_by_pattern(
                 lambda x: next(uids["__tmp"]),
                 result_collection_constructor=as_tuple,
             )(tmp_expr.type)
+
+            def extract_concrete_dtype(type_: ts.TypeSpec) -> ts.ScalarType | ts.ListType:
+                dtype = type_info.extract_dtype(type_)
+                # GTIR is only ever created from concrete (specialized) types
+                assert not isinstance(dtype, ts.TypeVarType)
+                return dtype
+
             tmp_dtypes: (
                 ts.ScalarType | ts.ListType | tuple[ts.ScalarType | ts.ListType | tuple, ...]
             ) = type_info.tree_map_type(
-                type_info.extract_dtype,
+                extract_concrete_dtype,
                 result_collection_constructor=as_tuple,
             )(tmp_expr.type)
 

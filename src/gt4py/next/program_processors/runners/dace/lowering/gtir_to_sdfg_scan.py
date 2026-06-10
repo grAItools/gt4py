@@ -622,6 +622,8 @@ def _handle_dataflow_result_of_nested_sdfg(
         None,
         dace.Memlet.from_array(outer_dataname, outer_desc),
     )
+    # only concrete (specialized) types reach the lowering
+    assert not isinstance(inner_data.gt_type.dtype, ts.TypeVarType)
     output_expr = gtir_dataflow.ValueExpr(outer_node, inner_data.gt_type.dtype)
     return gtir_dataflow.DataflowOutputEdge(outer_ctx.state, output_expr)
 
