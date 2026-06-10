@@ -8,7 +8,7 @@
   (`b: Field[Dims[Staggered[I]]] = a(I + 1/2)`), and (III) dimension
   *variables* (dim-generic operators) in the DSL type system.
 - **Prototypes**: the critical pieces are implemented and tested on this
-  branch — see §7 for what exactly is proven by
+  branch — see §8 for what exactly is proven by
   [`prototypes/typed_dimensions/`](prototypes/typed_dimensions/) (static
   expressibility, mypy-verified) and the `ts.DimensionVar`/`ts.DimsVar`
   extension of the type system (unit-tested, inert).
@@ -464,7 +464,87 @@ D5) gain dims rules under a single binding environment
   no new machinery (the prototype's `to_staggered` shows the static side
   already works).
 
-## 6. Python version considerations
+## 6. Related work: coordax
+
+[coordax](https://github.com/neuralgcm/coordax) ("Coordinate Axes for JAX",
+by the NeuralGCM / JAX-CFD / Xarray authors) solves an overlapping problem —
+dimension-labeled fields for simulation codes — with an instructive mix of
+shared spirit and opposite mechanism.
+
+**The coordax model.** `Field` = array + `dims: tuple[str | None, ...]` +
+`axes: dict[str, Coordinate]`. A dimension's *identity* is a **string**; an
+axis may also be `None` ("positional"). `Coordinate` objects are frozen
+dataclasses registered as *static* JAX pytree nodes carrying `dims`, `shape`
+and optional tick fields (`SizedAxis` checks only size, `LabeledAxis` checks
+tick equality, custom subclasses model e.g. spectral grids). Operations
+require **exact coordinate alignment** — deliberately no Xarray-style
+auto-alignment, which the authors call out as wrong for simulation code.
+Dimension-generic code is written *dynamically*: `untag` a named axis into a
+positional one, apply a plain-array function via `cmap` (which `vmap`s over
+all remaining named axes), `tag` the result.
+
+**Similar in spirit.**
+
+- *Strictness*: coordax's exact-alignment / no-auto-align stance is the same
+  philosophy as our strict no-promotion policy (dtype D3, dims §5.4) — make
+  domain mismatches errors, not conversions.
+- *Checks before run time*: their static-pytree `Coordinate`s give
+  "compile-time" (JAX-trace-time) consistency checks; our decoration-time
+  FOAST checking plays the same role one stage earlier, and the dims-as-types
+  layer adds a stage coordax does not have at all (see below).
+- *Identity/metadata split*: coordax separates cheap per-axis identity
+  (string) from rich coordinate metadata (`Coordinate` with ticks). GT4Py has
+  the same split — `Dimension` (identity + kind) vs `Domain`/`NamedRange` and
+  offset providers (the actual coordinates) — and this design keeps it:
+  Part I promotes only the *identity* half to the type level; ranges/ticks
+  remain runtime values. A coordax `Coordinate` maps to (dimension, range)
+  pairs, not to `Dimension` itself.
+- *Pointwise-over-named-axes semantics*: `cmap`'s "apply over positional,
+  vectorize over named" is essentially the field-view semantics gt4py field
+  operators already have (pointwise over the field's dims with implicit
+  broadcast).
+
+**Opposite mechanism, and what that buys/costs.**
+
+- Identity as *strings and values* (coordax) vs *nominal types* (this
+  design). Coordax has **no static-typing story**: `cx.Field` is opaque to
+  mypy — wrong-dimension code trace-fails at run/trace time. That is the
+  torchtyping/jaxtyping lesson from the dtype investigation again, and the
+  gap Part I exists to close. Conversely, coordax needs no rank-bounded
+  overloads and no metaclass machinery — its flexibility (axes appearing/
+  disappearing under `vmap`, `None` axes) comes precisely from *not* putting
+  dims in types.
+- Dimension genericity: dynamic erasure (`untag`/`cmap`, rank polymorphism
+  via `vmap`) vs typed variables + monomorphization (Part III). The coordax
+  pattern needs no signature-level machinery but moves all errors to trace
+  time and erases dim safety *inside* the generic function body; our DSL
+  keeps the body symbolically checked (§5.4).
+- Staggering: not first-class in coordax; the idiom (explicit in its
+  sibling JAX-CFD, whose `GridArray` carries a value-level
+  `offset=(0.5, ...)`) is coordinate *metadata* — a staggered field is a
+  `LabeledAxis`/custom `Coordinate` with shifted ticks, and mixing grids
+  fails the runtime tick-equality check. Part II promotes exactly this
+  metadata bit to a type (`Staggered[I]`, `Dual[X]`), making the same
+  mistake a static + decoration-time error and giving shifts a *type-level*
+  effect (`a(I + 1/2)` changing the dims type has no coordax analogue).
+
+**How coordax could fit.** Not as a dependency — gt4py's `Field`/`Domain`
+already cover its runtime role — but three concrete touchpoints:
+
+1. *Interop*: a lossless `gt4py.Field ↔ cx.Field` mapping is cheap and
+   useful for the JAX-backed embedded path and for analysis pipelines
+   (dimension class → dim name; `NamedRange`/staggering → a `Coordinate`
+   subclass whose ticks encode the half-offset; `kind` → coordinate
+   metadata). Mirrors coordax's own "lossless to/from Xarray" goal.
+2. *Validation of the identity/metadata split* (above): coordax arrived at
+   the same factoring independently — supporting evidence that promoting
+   dimension *identity* (not coordinates) to types is the right cut.
+3. *A `cmap`-shaped escape hatch* is what §5.4's v0 restrictions would send
+   users to when an operation's dims-effect is not expressible symbolically:
+   the embedded API could expose an explicit untag/apply/tag idiom for
+   power users rather than silently widening the typed surface.
+
+## 7. Python version considerations
 
 GT4Py currently supports 3.10–3.14; the design is *not* required to hold back
 to 3.10 if a newer version buys expressiveness. Audit result: **every
@@ -508,7 +588,7 @@ add ergonomics, not power:
     exactly why it is designed as bounded *codegen* rather than a hand-kept
     API surface.
 
-## 7. What the prototypes prove
+## 8. What the prototypes prove
 
 **A. Static expressibility** — [`prototypes/typed_dimensions/`](prototypes/typed_dimensions/)
 (self-contained; `uv run pytest docs/development/investigations/prototypes/typed_dimensions/`;
@@ -542,7 +622,7 @@ produces them, mypy-clean, all existing tests pass):
   binding, consistency errors, scalar args, end-to-end `FunctionType`
   bind+substitute).
 
-## 8. Staged plan
+## 9. Staged plan
 
 Stages 0–2 of the dtype plan are prerequisites for the *frontend* stages here
 (the binding utilities are shared); Part I/II stages are independent of dtype.
@@ -565,7 +645,7 @@ Stages 0–2 of the dtype plan are prerequisites for the *frontend* stages here
    `dim ± fraction` typing, relocation offset providers, embedded `premap`
    wiring, domain conventions; ADR for the position convention.
 
-## 9. Risks and open questions
+## 10. Risks and open questions
 
 1. **The metaclass-overload mypy quirk** (§3.3): call-site behavior is
    correct but the def-site suppression could break on a mypy upgrade;
