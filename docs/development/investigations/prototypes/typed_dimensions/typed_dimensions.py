@@ -346,7 +346,7 @@ class Dual(DimensionBase, Generic[AnyX]):
 
 
 class DualUnaryOperator(Protocol[DT]):
-    """A unary field operator mapping every field to its dual grid."""
+    """A unary field operator mapping every field to its dual grid: ``X -> Dual[X]``."""
 
     @overload
     def __call__(self, f: Field[Dims[Staggered[D]], DT]) -> Field[Dims[D], DT]: ...
@@ -354,11 +354,36 @@ class DualUnaryOperator(Protocol[DT]):
     def __call__(self, f: Field[Dims[D], DT]) -> Field[Dims[Staggered[D]], DT]: ...
 
 
+class DualBinaryOperator(Protocol[DT]):
+    """A binary field operator of shape ``(X, Dual[X]) -> Dual[X]``.
+
+    The second argument (e.g. a weight) already lives on the dual grid of the
+    first; the call is rejected when both arguments live on the same grid.
+    """
+
+    @overload
+    def __call__(
+        self, f: Field[Dims[Staggered[D]], DT], g: Field[Dims[D], DT]
+    ) -> Field[Dims[D], DT]: ...
+    @overload
+    def __call__(
+        self, f: Field[Dims[D], DT], g: Field[Dims[Staggered[D]], DT]
+    ) -> Field[Dims[Staggered[D]], DT]: ...
+
+
+# One decorator, overloaded per recognized signature shape (in gt4py proper
+# these overloads would live on `@field_operator`).
+@overload
 def dual_operator(
     fn: Callable[[Field[Dims[AnyX], DT]], Field[Dims[Dual[AnyX]], DT]],
-) -> DualUnaryOperator[DT]:
+) -> DualUnaryOperator[DT]: ...
+@overload
+def dual_operator(
+    fn: Callable[[Field[Dims[AnyX], DT], Field[Dims[Dual[AnyX]], DT]], Field[Dims[Dual[AnyX]], DT]],
+) -> DualBinaryOperator[DT]: ...
+def dual_operator(fn: Callable[..., Any]) -> Any:
     """Give a dual-generic operator its precise (overloaded) call type."""
-    return fn  # type: ignore[return-value]  # the protocol *is* the resolved meaning of `Dual`
+    return fn  # the returned protocol *is* the resolved meaning of `Dual`
 
 
 @dataclasses.dataclass(frozen=True)

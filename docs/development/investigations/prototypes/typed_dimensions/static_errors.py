@@ -65,3 +65,11 @@ def doubly_staggered_dimensions_are_unrepresentable(
 @dual_operator  # EXPECT-ERROR: signature does not map X to Dual[X]
 def not_dual_generic(f: Field[Dims[I], float]) -> Field[Dims[I], float]:
     return f
+
+
+def weight_must_live_on_the_dual_grid(
+    a: Field[Dims[I], float], same_grid_weight: Field[Dims[I], float]
+) -> None:
+    from static_checks import weighted_avg
+
+    weighted_avg(a, same_grid_weight)  # EXPECT-ERROR: weight is on X, not Dual[X]

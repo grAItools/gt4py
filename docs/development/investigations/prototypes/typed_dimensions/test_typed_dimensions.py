@@ -147,6 +147,24 @@ def test_avg_from_staggered():
     np.testing.assert_array_equal(result.ndarray, [3.0, 1.0, 3.0, 5.0])
 
 
+def weighted_avg(a: NdField, w: NdField) -> NdField:
+    """Runtime twin of the dual-generic `weighted_avg` in `static_checks.py`."""
+    (dim,) = a.dims
+    return w * (a(dim + 1 / 2) + a(dim - 1 / 2))
+
+
+def test_weighted_avg():
+    a = NdField((I,), np.asarray([0.0, 1.0, 2.0, 3.0]))
+    w = NdField((Staggered[I],), np.asarray([1.0, 2.0, 3.0, 4.0]))
+    result = weighted_avg(a, w)
+    assert result.dimensions == (Staggered[I],)
+    # at staggered point i+1/2: w[i] * (a[i+1] + a[i]) (periodic)
+    np.testing.assert_array_equal(result.ndarray, [1.0, 6.0, 15.0, 12.0])
+
+    back = weighted_avg(result, a)
+    assert back.dimensions == (I,)
+
+
 def test_avg_roundtrip_dims():
     a = make_ifield([0.0, 1.0, 2.0, 3.0])
     assert avg(avg(a)).dimensions == (I,)

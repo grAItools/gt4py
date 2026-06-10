@@ -171,6 +171,18 @@ def avg(f: Field[Dims[AnyDimT], float]) -> Field[Dims[Dual[AnyDimT]], float]:
     return f(dim - 1 / 2) + f(dim + 1 / 2)
 
 
+# `Dual[X]` also works in *parameter* positions, e.g. a weight that already
+# lives on the target (dual) grid; the decorator picks the matching shape.
+
+
+@dual_operator
+def weighted_avg(
+    a: Field[Dims[AnyDimT], float], weight: Field[Dims[Dual[AnyDimT]], float]
+) -> Field[Dims[Dual[AnyDimT]], float]:
+    dim: Any = a.dims[0]
+    return weight * (a(dim + 1 / 2) + a(dim - 1 / 2))
+
+
 def use_avg(a: Field[Dims[I], float], b: Field[Dims[Staggered[I]], float]) -> None:
     assert_type(avg(a), Field[Dims[Staggered[I]], float])  # to the dual grid ...
     assert_type(avg(b), Field[Dims[I], float])  # ... and from it
@@ -180,6 +192,9 @@ def use_avg(a: Field[Dims[I], float], b: Field[Dims[Staggered[I]], float]) -> No
     assert_type(avg_explicit(a), Field[Dims[Staggered[I]], float])
     assert_type(avg_explicit(b), Field[Dims[I], float])
     assert_type(avg_explicit(avg_explicit(a)), Field[Dims[I], float])
+    # Dual[X] in parameter position: the weight lives on the result grid
+    assert_type(weighted_avg(a, b), Field[Dims[Staggered[I]], float])
+    assert_type(weighted_avg(b, a), Field[Dims[I], float])
 
 
 # --- Vertical-only operators (kind-restricted by nominal typing) -------------

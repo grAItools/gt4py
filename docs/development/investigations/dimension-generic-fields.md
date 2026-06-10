@@ -307,10 +307,23 @@ def __add__(cls: type[D], offset: float) -> Connectivity[Staggered[D], D]: ...
       ...
   ```
 
-  The library writes one such protocol per supported signature *shape*
-  (unary, binary, ...) — the same bounded-codegen philosophy as the
-  rank/position overloads, and in gt4py proper this typing belongs on
-  `@field_operator` itself, so DSL users add nothing.
+  `Dual[X]` works in *parameter* positions too, e.g. a weight already living
+  on the target grid (prototype-verified, including rejection of a weight on
+  the wrong grid at the call site):
+
+  ```python
+  @dual_operator
+  def weighted_avg(
+      a: Field[Dims[X], float], weight: Field[Dims[Dual[X]], float]
+  ) -> Field[Dims[Dual[X]], float]:
+      ...
+  ```
+
+  The library writes one resolving protocol per supported signature *shape*
+  (unary `X -> Dual[X]`, binary `(X, Dual[X]) -> Dual[X]`, ...), and the
+  decorator is overloaded across the shapes — the same bounded-codegen
+  philosophy as the rank/position overloads. In gt4py proper this typing
+  belongs on `@field_operator` itself, so DSL users add nothing.
 
   Note the asymmetry with the DSL: the *internal* type system is ours, so
   there `Dual` can be a first-class type operator with the reduction rule
