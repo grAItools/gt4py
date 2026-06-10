@@ -15,7 +15,7 @@ mypy error on exactly that line; any error on an unmarked line fails the test
 
 from __future__ import annotations
 
-from typed_dimensions import Dimension, DimensionKind, Dims, Field, Staggered
+from typed_dimensions import Dimension, DimensionKind, Dims, Field, Staggered, dual_operator
 
 
 class I(Dimension): ...  # noqa: E742
@@ -60,3 +60,8 @@ def roundtrip_must_go_through_the_dual(a: Field[Dims[I], float]) -> None:
 def doubly_staggered_dimensions_are_unrepresentable(
     dd: Field[Dims[Staggered[Staggered[I]]], float],  # EXPECT-ERROR: Staggered requires a Dimension
 ) -> None: ...
+
+
+@dual_operator  # EXPECT-ERROR: signature does not map X to Dual[X]
+def not_dual_generic(f: Field[Dims[I], float]) -> Field[Dims[I], float]:
+    return f

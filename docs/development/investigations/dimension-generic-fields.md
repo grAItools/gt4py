@@ -294,14 +294,31 @@ def __add__(cls: type[D], offset: float) -> Connectivity[Staggered[D], D]: ...
       return f(dim - 1 / 2) + f(dim + 1 / 2)
   ```
 
+  The overload pair does **not** have to be user-written, though: a `Dual[X]`
+  marker type plus a decorator whose argument type *recognizes* dual-generic
+  signatures and whose return type is a library-provided protocol carrying
+  the overload pair gives the same precision from one natural signature
+  (also prototype-verified, including rejection of non-dual signatures at
+  the decorator):
+
+  ```python
+  @dual_operator                      # in gt4py: folded into @field_operator
+  def avg(f: Field[Dims[X], float]) -> Field[Dims[Dual[X]], float]:
+      ...
+  ```
+
+  The library writes one such protocol per supported signature *shape*
+  (unary, binary, ...) — the same bounded-codegen philosophy as the
+  rank/position overloads, and in gt4py proper this typing belongs on
+  `@field_operator` itself, so DSL users add nothing.
+
   Note the asymmetry with the DSL: the *internal* type system is ours, so
   there `Dual` can be a first-class type operator with the reduction rule
   `Dual[Dual[X]] = X` (or equivalently: applied eagerly during binding,
   since monomorphization makes `X` concrete before any result type is
-  needed). Only the mypy-facing layer needs the overload encoding; for a
-  dim-generic `avg` written *in* the DSL, the frontend types the body
-  symbolically (`f(X ± 1/2): Field[Dims[Dual[X]], T]`) and `dual()` is
-  computed at specialization time — no per-direction duplication anywhere.
+  needed). The same `Dual[X]` annotation thus serves both layers: mypy
+  resolves it through the decorator overloads, the frontend through
+  `dual()` at specialization time — no per-direction duplication anywhere.
 
 ### 4.3 Semantics (value level)
 

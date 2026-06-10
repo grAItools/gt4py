@@ -38,7 +38,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import math
-from typing import Any, ClassVar, Generic, Protocol, TypeVar, cast, overload
+from typing import Any, Callable, ClassVar, Generic, Protocol, TypeVar, cast, overload
 
 import numpy as np
 from typing_extensions import TypeVarTuple, Unpack
@@ -317,6 +317,48 @@ class Field(Protocol[DimsT, DT]):
     def __add__(self: Field[DimsT2, DT], other: Field[DimsT2, DT] | DT) -> Field[DimsT2, DT]: ...
     def __sub__(self: Field[DimsT2, DT], other: Field[DimsT2, DT] | DT) -> Field[DimsT2, DT]: ...
     def __mul__(self: Field[DimsT2, DT], other: Field[DimsT2, DT] | DT) -> Field[DimsT2, DT]: ...
+
+
+# --- Dual-generic operator support (library side) ---------------------------
+#
+# Python typing has no type-level function, so "the dual grid of X"
+# (I -> Staggered[I], Staggered[I] -> I) cannot be computed in a user
+# signature. Instead the library provides:
+#   - `Dual[X]`, a *marker* type only meaningful in annotations of
+#     dual-generic operators, and
+#   - a decorator whose return type is a protocol carrying the
+#     dual-resolving overload pair (written once per signature shape).
+# Users then write a single natural signature; in gt4py proper this typing
+# would live on `@field_operator` itself, so users add nothing at all.
+
+AnyX = TypeVar("AnyX", bound="DimensionBase")
+
+
+class Dual(DimensionBase, Generic[AnyX]):
+    """
+    Marker for "the dual-grid counterpart of dimension `AnyX`".
+
+    Unlike `Staggered`, this is not a real dimension: it never materializes and
+    is resolved away by the typing of `dual_operator` (statically) or by the
+    DSL frontend at specialization time (`dual()`), where the reduction rule
+    ``Dual[Dual[X]] = X`` can be applied for real.
+    """
+
+
+class DualUnaryOperator(Protocol[DT]):
+    """A unary field operator mapping every field to its dual grid."""
+
+    @overload
+    def __call__(self, f: Field[Dims[Staggered[D]], DT]) -> Field[Dims[D], DT]: ...
+    @overload
+    def __call__(self, f: Field[Dims[D], DT]) -> Field[Dims[Staggered[D]], DT]: ...
+
+
+def dual_operator(
+    fn: Callable[[Field[Dims[AnyX], DT]], Field[Dims[Dual[AnyX]], DT]],
+) -> DualUnaryOperator[DT]:
+    """Give a dual-generic operator its precise (overloaded) call type."""
+    return fn  # type: ignore[return-value]  # the protocol *is* the resolved meaning of `Dual`
 
 
 @dataclasses.dataclass(frozen=True)

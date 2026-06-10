@@ -19,7 +19,17 @@ from __future__ import annotations
 
 from typing import Any, TypeAlias, TypeVar, overload
 
-from typed_dimensions import Connectivity, Dimension, DimensionKind, Dims, Field, Staggered
+from typed_dimensions import (
+    Connectivity,
+    Dimension,
+    DimensionBase,
+    DimensionKind,
+    Dims,
+    Dual,
+    Field,
+    Staggered,
+    dual_operator,
+)
 from typing_extensions import TypeVarTuple, Unpack, assert_type
 
 
@@ -130,18 +140,33 @@ def use_generic_operators(
 # --- Dual-generic operators ---------------------------------------------------
 #
 # `avg` maps a field to its *dual* grid: I -> Staggered[I], but also
-# Staggered[I] -> I. Python typing has no type-level function `Dual[X]`, yet
-# the same overload pair that types `DimensionMeta.__add__` expresses it:
-# one implementation body, two signature lines, generic at every call site.
+# Staggered[I] -> I. Python typing has no type-level function `Dual[X]`, but
+# the same overload-pair trick that types `DimensionMeta.__add__` expresses
+# it. Two equivalent spellings:
+
+# (1) explicit: the user writes the overload pair (one body, two signature lines)
 
 
 @overload
-def avg(f: Field[Dims[Staggered[DimT]], float]) -> Field[Dims[DimT], float]: ...
+def avg_explicit(f: Field[Dims[Staggered[DimT]], float]) -> Field[Dims[DimT], float]: ...
 @overload
-def avg(f: Field[Dims[DimT], float]) -> Field[Dims[Staggered[DimT]], float]: ...
-def avg(f: Field[Any, float]) -> Field[Any, float]:
+def avg_explicit(f: Field[Dims[DimT], float]) -> Field[Dims[Staggered[DimT]], float]: ...
+def avg_explicit(f: Field[Any, float]) -> Field[Any, float]:
     # The body is dual-generic, so the dimension is only known as "the field's
     # dimension"; recover it at runtime (`Any`: precision lives in the overloads).
+    dim: Any = f.dims[0]
+    return f(dim - 1 / 2) + f(dim + 1 / 2)
+
+
+# (2) declarative: ONE natural signature with the `Dual[X]` marker; the overload
+#     pair lives in the library (`DualUnaryOperator`), attached by the decorator.
+#     In gt4py proper this would be folded into `@field_operator` itself.
+
+AnyDimT = TypeVar("AnyDimT", bound=DimensionBase)  # ranges over staggered dims too
+
+
+@dual_operator
+def avg(f: Field[Dims[AnyDimT], float]) -> Field[Dims[Dual[AnyDimT]], float]:
     dim: Any = f.dims[0]
     return f(dim - 1 / 2) + f(dim + 1 / 2)
 
@@ -151,6 +176,10 @@ def use_avg(a: Field[Dims[I], float], b: Field[Dims[Staggered[I]], float]) -> No
     assert_type(avg(b), Field[Dims[I], float])  # ... and from it
     assert_type(avg(avg(a)), Field[Dims[I], float])  # round trip
     assert_type(avg(avg(avg(a))), Field[Dims[Staggered[I]], float])
+    # the explicit spelling types identically
+    assert_type(avg_explicit(a), Field[Dims[Staggered[I]], float])
+    assert_type(avg_explicit(b), Field[Dims[I], float])
+    assert_type(avg_explicit(avg_explicit(a)), Field[Dims[I], float])
 
 
 # --- Vertical-only operators (kind-restricted by nominal typing) -------------
