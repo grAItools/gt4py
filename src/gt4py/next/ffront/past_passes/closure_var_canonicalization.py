@@ -87,7 +87,7 @@ class ClosureVarCanonicalization(NodeTranslator, traits.VisitorWithSymbolTableTr
         current_closure_vars: list[past.Symbol],
         symtable: dict[str, past.Symbol],
         **kwargs: Any,
-    ) -> past.Name | past.Constant:
+    ) -> past.Name | past.Constant | past.Attribute:
         if node.id in symtable and symtable[node.id] in current_closure_vars:
             value = self.closure_vars[node.id]
             return self._resolve_value_reference(
@@ -123,7 +123,7 @@ class ClosureVarCanonicalization(NodeTranslator, traits.VisitorWithSymbolTableTr
         *,
         via_namespace: bool,
         symtable: dict[str, past.Symbol],
-    ) -> past.Name | past.Constant:
+    ) -> past.Name | past.Constant | past.Attribute:
         location = node.location
 
         if isinstance(value, type_translation.PythonNamespaceObject):
@@ -137,7 +137,14 @@ class ClosureVarCanonicalization(NodeTranslator, traits.VisitorWithSymbolTableTr
                 )
             return node  # type: ignore[return-value]  # always a past.Name here
 
-        if isinstance(value, (fbuiltins.FieldOffset, common.Dimension)):
+        if isinstance(value, common.Dimension):
+            # dimensions resolve by value through the type system ('NamespaceProxy'),
+            # so attribute references can stay as they are. Renaming them to the
+            # dimension's name could collide with the offset of the same name
+            # (e.g. local dimension 'V2E' vs. offset 'V2E').
+            return node  # type: ignore[return-value]  # past.Name or past.Attribute
+
+        if isinstance(value, fbuiltins.FieldOffset):
             if via_namespace:
                 return self._make_reference(str(value.value), value, location, symtable)
             return node  # type: ignore[return-value]  # always a past.Name here

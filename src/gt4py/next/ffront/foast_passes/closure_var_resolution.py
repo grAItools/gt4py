@@ -124,7 +124,7 @@ class ClosureVarResolution(NodeTranslator, traits.VisitorWithSymbolTableTrait):
         current_closure_vars: list[foast.Symbol],
         symtable: dict[str, foast.Symbol],
         **kwargs: Any,
-    ) -> foast.Name | foast.Constant:
+    ) -> foast.Name | foast.Constant | foast.Attribute:
         if node.id in symtable and symtable[node.id] in current_closure_vars:
             value = self.closure_vars[node.id]
             return self._resolve_value_reference(
@@ -162,7 +162,7 @@ class ClosureVarResolution(NodeTranslator, traits.VisitorWithSymbolTableTrait):
         *,
         via_namespace: bool,
         symtable: dict[str, foast.Symbol],
-    ) -> foast.Name | foast.Constant:
+    ) -> foast.Name | foast.Constant | foast.Attribute:
         location = node.location
 
         if (builtin_name := _BUILTIN_NAME_BY_ID.get(id(value))) is not None:
@@ -179,9 +179,16 @@ class ClosureVarResolution(NodeTranslator, traits.VisitorWithSymbolTableTrait):
                 )
             return node  # type: ignore[return-value]  # always a foast.Name here
 
-        if isinstance(value, (fbuiltins.FieldOffset, common.Dimension)):
+        if isinstance(value, common.Dimension):
+            # dimensions resolve by value through the type system ('NamespaceProxy'),
+            # so attribute references can stay as they are. Renaming them to the
+            # dimension's name could collide with the offset of the same name
+            # (e.g. local dimension 'V2E' vs. offset 'V2E').
+            return node  # type: ignore[return-value]  # foast.Name or foast.Attribute
+
+        if isinstance(value, fbuiltins.FieldOffset):
             if via_namespace:
-                # for offsets the name is also the key used for offset-provider lookups
+                # the offset name is also the key used for offset-provider lookups
                 return self._make_reference(str(value.value), value, location, symtable)
             return node  # type: ignore[return-value]  # always a foast.Name here
 
