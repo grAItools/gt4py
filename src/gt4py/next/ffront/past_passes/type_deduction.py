@@ -223,6 +223,8 @@ class ProgramTypeDeduction(traits.VisitorWithSymbolTableTrait, NodeTranslator):
         )
 
     def visit_Call(self, node: past.Call, **kwargs: Any) -> past.Call:
+        # attribute call targets are resolved to names by `ClosureVarCanonicalization`
+        assert isinstance(node.func, past.Name)
         new_func = self.visit(node.func, **kwargs)
         new_args = self.visit(node.args, **kwargs)
         new_kwargs = self.visit(node.kwargs, **kwargs)

@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 
 from gt4py import eve
 from gt4py.eve.extended_typing import Never, cast
-from gt4py.next import common, utils
+from gt4py.next import common, errors, utils
 from gt4py.next.ffront import (
     dialect_ast_enums,
     experimental as experimental_builtins,
@@ -32,12 +32,43 @@ from gt4py.next.otf import arguments, toolchain, workflow
 from gt4py.next.type_system import type_info, type_specifications as ts, type_translation as tt
 
 
+def _check_closure_vars_bindable(node: foast.OperatorNode | foast.FunctionDefinition) -> None:
+    """
+    Check that all referenced closure variables can be represented in the lowered IR.
+
+    Data values (scalars, fields, tuples) captured from the surrounding scope have
+    no compiled-program representation: scalar constants are folded into the AST by
+    `ClosureVarResolution` if their binding is known to be constant; everything else
+    only works in embedded execution and is rejected here with an explanatory error.
+    """
+    definition = node.definition if isinstance(node, foast.OperatorNode) else node
+    for symbol in definition.closure_vars:
+        if isinstance(symbol.type, ts.DataType):
+            if isinstance(symbol.type, ts.ScalarType):
+                hint = (
+                    " To use a scalar constant in a compiled program, annotate it as"
+                    " 'typing.Final' at module level or put it into a"
+                    " 'gt4py.eve.utils.FrozenNamespace'."
+                )
+            elif isinstance(symbol.type, ts.FieldType):
+                hint = " Fields must be passed as arguments to the operator."
+            else:
+                hint = ""
+            raise errors.DSLError(
+                symbol.location,
+                f"Closure variable '{symbol.id}' of type '{symbol.type}' cannot be used in a"
+                f" compiled program: only compile-time constants, dimensions, offsets, builtins"
+                f" and other operators can be captured.{hint}",
+            )
+
+
 def foast_to_gtir(inp: ffront_stages.FOASTOperatorDef) -> itir.FunctionDefinition:
     """
     Lower a FOAST field operator node to GTIR.
 
     See the docstring of `FieldOperatorLowering` for details.
     """
+    _check_closure_vars_bindable(inp.foast_node)
     return FieldOperatorLowering.apply(inp.foast_node)
 
 

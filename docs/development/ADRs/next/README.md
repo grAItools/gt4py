@@ -24,6 +24,7 @@ Writing a new ADR is simple:
 - [0002 - Field View Lowering](0002-Field_View_Lowering.md)
 - [0010 - Domain in Field View](0010-Domain_in_Field_View.md)
 - [0013 - Scalar vs 0d-Fields](0013-Scalar_vs_0d_Fields.md)
+- [0023 - Closure Variable Resolution](0023-Closure_Variable_Resolution.md)
 
 ### Iterator IR #iterator
 

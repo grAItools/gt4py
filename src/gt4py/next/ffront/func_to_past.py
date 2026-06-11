@@ -25,6 +25,7 @@ from gt4py.next.ffront import (
     type_specifications as ts_ffront,
 )
 from gt4py.next.ffront.dialect_parser import DialectParser
+from gt4py.next.ffront.past_passes.closure_var_canonicalization import ClosureVarCanonicalization
 from gt4py.next.ffront.past_passes.closure_var_type_deduction import ClosureVarTypeDeduction
 from gt4py.next.ffront.past_passes.type_deduction import ProgramTypeDeduction
 from gt4py.next.ffront.stages import (
@@ -64,8 +65,11 @@ def func_to_past(inp: DSLProgramDef) -> PASTProgramDef:
     source_def = source_utils.SourceDefinition.from_function(inp.definition)
     closure_vars = source_utils.get_closure_vars_from_function(inp.definition)
     annotations = typing.get_type_hints(inp.definition)
+    final_names = source_utils.get_final_closure_var_names(inp.definition, closure_vars.keys())
+    # note: `closure_vars` is extended in-place with canonical names by
+    # `ClosureVarCanonicalization`
     return ffront_stages.PASTProgramDef(
-        past_node=ProgramParser.apply(source_def, closure_vars, annotations),
+        past_node=ProgramParser.apply(source_def, closure_vars, annotations, final_names),
         closure_vars=closure_vars,
         grid_type=inp.grid_type,
         debug=inp.debug,
@@ -103,8 +107,13 @@ class ProgramParser(DialectParser[past.Program]):
 
     @classmethod
     def _postprocess_dialect_ast(
-        cls, output_node: past.Program, closure_vars: dict[str, Any], annotations: dict[str, Any]
+        cls,
+        output_node: past.Program,
+        closure_vars: dict[str, Any],
+        annotations: dict[str, Any],
+        final_names: frozenset[str] = frozenset(),
     ) -> past.Program:
+        output_node = ClosureVarCanonicalization.apply(output_node, closure_vars, final_names)
         output_node = ClosureVarTypeDeduction.apply(output_node, closure_vars)
         return ProgramTypeDeduction.apply(output_node)
 
@@ -208,9 +217,10 @@ class ProgramParser(DialectParser[past.Program]):
     def visit_Call(self, node: ast.Call) -> past.Call:
         loc = self.get_location(node)
         new_func = self.visit(node.func)
-        if not isinstance(new_func, past.Name):
+        if not isinstance(new_func, (past.Name, past.Attribute)):
             raise errors.DSLError(
-                loc, "Functions must be referenced by their name in function calls."
+                loc,
+                "Functions must be referenced by their name or as an attribute of a module.",
             )
 
         return past.Call(

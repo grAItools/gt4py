@@ -82,7 +82,7 @@ def past_to_gtir(inp: ConcretePASTProgramDef) -> definitions.CompilableProgramDe
 
     gt_callables = transform_utils._filter_closure_vars_by_type(
         all_closure_vars, gtcallable.GTCallable
-    ).values()
+    )
 
     # FIXME[#1582](tehrengruber): remove after refactoring to GTIR
     # TODO(ricoh): The following calls to .__gt_itir__, which will use whatever
@@ -90,8 +90,16 @@ def past_to_gtir(inp: ConcretePASTProgramDef) -> definitions.CompilableProgramDe
     #  we should use the current toolchain to lower these to ITIR. This will require
     #  making this step aware of the toolchain it is called by (it can be part of multiple).
     lowered_funcs = []
-    for gt_callable in gt_callables:
-        lowered_funcs.append(gt_callable.__gt_gtir__())
+    for name, gt_callable in gt_callables.items():
+        lowered_func = gt_callable.__gt_gtir__()
+        if lowered_func.id != name:
+            # Function definitions are registered under the name they are referenced by,
+            # which may differ from the definition name (e.g. for aliased imports). The
+            # same callable can be registered under multiple names.
+            lowered_func = itir.FunctionDefinition(
+                id=name, params=lowered_func.params, expr=lowered_func.expr
+            )
+        lowered_funcs.append(lowered_func)
 
     itir_program = ProgramLowering.apply(
         inp.data.past_node, function_definitions=lowered_funcs, grid_type=grid_type
@@ -314,6 +322,7 @@ class ProgramLowering(
             node_kwargs.pop("out"), domain, **kwargs
         )
 
+        assert isinstance(node.func, past.Name)
         assert isinstance(node.func.type, (ts_ffront.FieldOperatorType, ts_ffront.ScanOperatorType))
 
         args, node_kwargs = type_info.canonicalize_arguments(node.func.type, node.args, node_kwargs)
@@ -515,6 +524,7 @@ class ProgramLowering(
         )
 
     def visit_Call(self, node: past.Call, **kwargs: Any) -> itir.FunCall:
+        assert isinstance(node.func, past.Name)
         if node.func.id in ["maximum", "minimum"]:
             assert len(node.args) == 2
             return itir.FunCall(

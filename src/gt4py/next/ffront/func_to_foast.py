@@ -31,7 +31,7 @@ from gt4py.next.ffront.ast_passes import (
 )
 from gt4py.next.ffront.dialect_parser import DialectParser
 from gt4py.next.ffront.foast_introspection import StmtReturnKind, deduce_stmt_return_kind
-from gt4py.next.ffront.foast_passes.closure_var_folding import ClosureVarFolding
+from gt4py.next.ffront.foast_passes.closure_var_resolution import ClosureVarResolution
 from gt4py.next.ffront.foast_passes.closure_var_type_deduction import ClosureVarTypeDeduction
 from gt4py.next.ffront.foast_passes.dead_closure_var_elimination import DeadClosureVarElimination
 from gt4py.next.ffront.foast_passes.iterable_unpack import UnpackedAssignPass
@@ -72,7 +72,11 @@ def func_to_foast(inp: DSLFieldOperatorDef) -> FOASTOperatorDef:
     source_def = source_utils.SourceDefinition.from_function(inp.definition)
     closure_vars = source_utils.get_closure_vars_from_function(inp.definition)
     annotations = typing.get_type_hints(inp.definition)
-    foast_definition_node = FieldOperatorParser.apply(source_def, closure_vars, annotations)
+    final_names = source_utils.get_final_closure_var_names(inp.definition, closure_vars.keys())
+    # note: `closure_vars` is extended in-place with canonical names by `ClosureVarResolution`
+    foast_definition_node = FieldOperatorParser.apply(
+        source_def, closure_vars, annotations, final_names
+    )
     loc = foast_definition_node.location
     operator_attribute_nodes = {
         key: foast.Constant(value=value, type=type_translation.from_value(value), location=loc)
@@ -167,8 +171,9 @@ class FieldOperatorParser(DialectParser[foast.FunctionDefinition]):
         foast_node: foast.FunctionDefinition | foast.FieldOperator,
         closure_vars: dict[str, Any],
         annotations: dict[str, Any],
+        final_names: frozenset[str] = frozenset(),
     ) -> foast.FunctionDefinition:
-        foast_node = ClosureVarFolding.apply(foast_node, closure_vars)
+        foast_node = ClosureVarResolution.apply(foast_node, closure_vars, final_names)
         foast_node = DeadClosureVarElimination.apply(foast_node)
         foast_node = ClosureVarTypeDeduction.apply(foast_node, closure_vars)
         foast_node = FieldOperatorTypeDeduction.apply(foast_node)

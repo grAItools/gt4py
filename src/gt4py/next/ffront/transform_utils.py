@@ -9,9 +9,34 @@
 import collections
 from typing import Any, Iterable, Optional
 
+import xxhash
+
 from gt4py.next import common
 from gt4py.next.ffront import fbuiltins
 from gt4py.next.ffront.gtcallable import GTCallable
+
+
+def _function_definition_name(value: GTCallable) -> str:
+    """Return the name under which a 'GTCallable' lowers its IR function definition."""
+    if (name := getattr(value, "__name__", None)) is not None:
+        return str(name)
+    return str(value.__gt_itir__().id)
+
+
+def mangled_function_name(value: GTCallable) -> str:
+    """
+    Return a value-derived symbol name for a reference to a `GTCallable`.
+
+    Used for references that have no source-level name of their own, e.g.
+    attribute accesses like ``some_module.an_operator``. The name is derived
+    from the value (not the reference) so that all references to the same
+    callable resolve to the same IR function, and it is stable across processes
+    (important for compiled program caches).
+    """
+    base = _function_definition_name(value)
+    definition = getattr(value, "definition", None)
+    key = f"{definition.__module__}:{definition.__qualname__}" if definition is not None else base
+    return f"{base}_{xxhash.xxh64(key.encode()).hexdigest()[:8]}"
 
 
 def _get_closure_vars_recursively(closure_vars: dict[str, Any]) -> dict[str, Any]:
@@ -34,7 +59,9 @@ def _get_closure_vars_recursively(closure_vars: dict[str, Any]) -> dict[str, Any
                     raise NotImplementedError(
                         f"Using closure vars with same name but different value "
                         f"across functions is not implemented yet. \n"
-                        f"Collisions: '{',  '.join(collisions)}'."
+                        f"Collisions: '{',  '.join(collisions)}'.\n"
+                        f"As a workaround import the conflicting functions under "
+                        f"distinct aliases (e.g. 'from foo import bar as foo_bar')."
                     )
 
                 all_closure_vars = collections.ChainMap(all_closure_vars, all_child_closure_vars)

@@ -17,7 +17,11 @@ from gt4py.eve.extended_typing import Any, Generic, TypeVar
 from gt4py.next import errors
 from gt4py.next.ffront.ast_passes.fix_missing_locations import FixMissingLocations
 from gt4py.next.ffront.ast_passes.remove_docstrings import RemoveDocstrings
-from gt4py.next.ffront.source_utils import SourceDefinition, get_closure_vars_from_function
+from gt4py.next.ffront.source_utils import (
+    SourceDefinition,
+    get_closure_vars_from_function,
+    get_final_closure_var_names,
+)
 
 
 DialectRootT = TypeVar("DialectRootT")
@@ -52,6 +56,9 @@ class DialectParser(ast.NodeVisitor, Generic[DialectRootT]):
     source_definition: SourceDefinition
     closure_vars: dict[str, Any]
     annotations: dict[str, Any]
+    #: names of closure variables whose binding is known to be constant
+    #: (e.g. annotated `typing.Final` at module level)
+    final_names: frozenset[str] = frozenset()
 
     reserved_names: ClassVar[Collection[str]] = ()  # e.g. for dialect builtins
 
@@ -61,6 +68,7 @@ class DialectParser(ast.NodeVisitor, Generic[DialectRootT]):
         source_definition: SourceDefinition,
         closure_vars: dict[str, Any],
         annotations: dict[str, Any],
+        final_names: frozenset[str] = frozenset(),
     ) -> DialectRootT:
         definition_ast: ast.AST
         definition_ast = parse_source_definition(source_definition)
@@ -72,9 +80,11 @@ class DialectParser(ast.NodeVisitor, Generic[DialectRootT]):
                 source_definition=source_definition,
                 closure_vars=closure_vars,
                 annotations=annotations,
+                final_names=final_names,
             ).visit(cls._preprocess_definition_ast(definition_ast)),
             closure_vars,
             annotations,
+            final_names,
         )
 
         return output_ast
@@ -84,7 +94,8 @@ class DialectParser(ast.NodeVisitor, Generic[DialectRootT]):
         src = SourceDefinition.from_function(function)
         closure_vars = get_closure_vars_from_function(function)
         annotations = typing.get_type_hints(function)
-        return cls.apply(src, closure_vars, annotations)
+        final_names = get_final_closure_var_names(function, closure_vars.keys())
+        return cls.apply(src, closure_vars, annotations, final_names)
 
     @classmethod
     def _preprocess_definition_ast(cls, definition_ast: ast.AST) -> ast.AST:
@@ -92,7 +103,11 @@ class DialectParser(ast.NodeVisitor, Generic[DialectRootT]):
 
     @classmethod
     def _postprocess_dialect_ast(
-        cls, output_ast: DialectRootT, closure_vars: dict[str, Any], annotations: dict[str, Any]
+        cls,
+        output_ast: DialectRootT,
+        closure_vars: dict[str, Any],
+        annotations: dict[str, Any],
+        final_names: frozenset[str] = frozenset(),
     ) -> DialectRootT:
         return output_ast
 

@@ -57,8 +57,15 @@ class Name(Expr):
     id: Coerced[SymbolRef]
 
 
+class Attribute(Expr):
+    attr: str
+    value: Expr
+
+
 class Call(Expr):
-    func: Name
+    # `Attribute` references (e.g. module-prefixed functions) are resolved to
+    # canonical `Name`s by the `ClosureVarCanonicalization` pass after parsing.
+    func: Union[Name, Attribute]
     args: list[Expr]
     kwargs: dict[str, Expr]
 
@@ -70,11 +77,6 @@ class Subscript(Expr):
 
 class TupleExpr(Expr):
     elts: list[Expr]
-
-
-class Attribute(Expr):
-    attr: str
-    value: Expr
 
 
 class Constant(Expr):

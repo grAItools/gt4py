@@ -54,37 +54,49 @@ def test_import_dims_module(cartesian_case):
     cases.verify(cartesian_case, mod_prog, f, isize, ksize, out=out, ref=expected)
 
 
-# TODO: these set of features should be allowed as module imports in a later PR
-def test_import_module_errors_future_allowed(cartesian_case):
-    from ....artifacts.dummy_package import dummy_module
+# note: these used to be expected errors before closure variable references
+# were resolved by value (see ADR 0023)
+def test_import_module_prefixed_builtin(cartesian_case):
+    @gtx.field_operator
+    def mod_op(f: cases.IField) -> cases.IKField:
+        f_i_k = gtx.broadcast(f, (cases.IDim, cases.KDim))
+        return f_i_k
 
+    f = cases.allocate(cartesian_case, mod_op, "f")()
+    out = cases.allocate(cartesian_case, mod_op, cases.RETURN)()
+    ref = np.reshape(np.repeat(f.asnumpy(), out.shape[1], axis=0), out.shape)
+    cases.verify(cartesian_case, mod_op, f, out=out, ref=ref)
+
+
+def test_import_module_prefixed_type_alias_error(cartesian_case):
+    # assigning a type constructor to a local variable is not supported
+    # (independently of how it is referenced: 'type_ = int32' fails alike)
     with pytest.raises(gtx.errors.DSLError):
 
         @gtx.field_operator
-        def field_op(f: cases.IField):
-            f_i_k = gtx.broadcast(f, (cases.IDim, cases.KDim))
-            return f_i_k
-
-    with pytest.raises(gtx.errors.DSLError):
-
-        @gtx.field_operator
-        def field_op(f: cases.IField):
+        def mod_op(f: cases.IField) -> cases.IField:
             type_ = gtx.int32
             return astype(f, type_)
 
-    with pytest.raises(gtx.errors.DSLError):
 
-        @gtx.field_operator
-        def field_op(f: cases.IField):
-            f_new = dummy_module.field_op_sample(f)
-            return f_new
+def test_import_module_prefixed_field_operator(cartesian_case):
+    from ....artifacts.dummy_package import dummy_module
 
-    with pytest.raises(gtx.errors.DSLError):
+    @gtx.field_operator
+    def field_op(f: cases.IKField) -> cases.IKField:
+        f_new = dummy_module.field_op_sample(f)
+        return f_new
 
-        @gtx.field_operator
-        def field_op(f: cases.IField):
-            return f
+    cases.verify_with_default_data(cartesian_case, field_op, ref=lambda f: f)
 
-        @gtx.program
-        def field_op(f: cases.IField):
-            dummy_module.field_op_sample(f, out=f, offset_provider={})
+
+def test_import_module_prefixed_field_operator_in_program(cartesian_case):
+    from ....artifacts.dummy_package import dummy_module
+
+    @gtx.program
+    def prog(f: cases.IKField, out: cases.IKField):
+        dummy_module.field_op_sample(f, out=out)
+
+    f = cases.allocate(cartesian_case, prog, "f")()
+    out = cases.allocate(cartesian_case, prog, "out")()
+    cases.verify(cartesian_case, prog, f, out, inout=out, ref=f.asnumpy())

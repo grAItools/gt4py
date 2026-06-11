@@ -13,7 +13,8 @@ import inspect
 import pathlib
 import symtable
 import textwrap
-from collections.abc import Callable, Iterator
+import typing
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -26,6 +27,31 @@ def get_closure_vars_from_function(function: Callable) -> dict[str, Any]:
 
     # nonlocals override globals, sorted for deterministic results
     return dict(sorted({**builtins, **globals, **nonlocals}.items()))
+
+
+def _is_final_annotation(annotation: Any) -> bool:
+    if annotation is None:
+        return False
+    if isinstance(annotation, str):
+        # unevaluated annotation (e.g. `from __future__ import annotations`)
+        annotation = annotation.strip()
+        for prefix in ("typing.", "t.", ""):
+            if annotation == f"{prefix}Final" or annotation.startswith(f"{prefix}Final["):
+                return True
+        return False
+    return annotation is typing.Final or typing.get_origin(annotation) is typing.Final
+
+
+def get_final_closure_var_names(function: Callable, names: Iterable[str]) -> frozenset[str]:
+    """
+    Return the subset of closure variable `names` whose binding is annotated `typing.Final`.
+
+    Only module-level (global) bindings can be checked: annotations of local
+    variables of an enclosing function are not available at runtime, so
+    captured nonlocals are never reported as final.
+    """
+    annotations = getattr(function, "__globals__", {}).get("__annotations__", {})
+    return frozenset(name for name in names if _is_final_annotation(annotations.get(name)))
 
 
 def make_source_definition_from_function(func: Callable) -> SourceDefinition:
