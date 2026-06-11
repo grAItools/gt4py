@@ -110,7 +110,9 @@ def test_status_quo_chained_connectivities_rejected():
 # --- §4.4: static encoding (mypy as the oracle) ---------------------------------
 
 
-def test_static_hops_encoding():
+@pytest.mark.parametrize("static_file", ["static_hops.py", "static_forest.py"])
+def test_static_encodings(static_file):
+    """static_hops.py: proposal A (path/LIFO); static_forest.py: proposal B (forest)."""
     typed_dimensions_dir = HERE.parent / "typed_dimensions"
     env = os.environ | {"MYPYPATH": str(typed_dimensions_dir)}
     result = subprocess.run(
@@ -120,7 +122,7 @@ def test_static_hops_encoding():
             "mypy",
             "--config-file",
             str(typed_dimensions_dir / "mypy.ini"),
-            "static_hops.py",
+            static_file,
         ],
         cwd=HERE,
         env=env,

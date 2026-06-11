@@ -10,10 +10,11 @@
   types, typed connectivities) and on the terminology of
   [ADR 0019 — Connectivities](../ADRs/next/0019-Connectivities.md).
 - **Prototype**: [`prototypes/dependent_local_dims/`](prototypes/dependent_local_dims/)
-  — a numpy mock verifying the reduction-order claim (§2) and a mypy-verified
-  static encoding of the proposed typing rules (§4.4).
-- **Outcome**: a design proposal ("dims as a topology path"); decision to be
-  recorded as an ADR after review.
+  — a numpy mock verifying the reduction-order claim (§2) and mypy-verified
+  static encodings of both proposals (§4.4: path, §5.4: forest).
+- **Outcome**: two design proposals — A "dims as a topology path" (ordered
+  hops, §4) and B "dims as a dependency forest" (order-free, §5) — with a
+  comparison (§6); decision to be recorded as an ADR after review.
 
 ## 1. Problem statement
 
@@ -118,7 +119,7 @@ Worth fixing in the same stroke (all verified against the sources):
   the entries point into), `target[0]` the new origin. The proposal below
   uses `origin`/`codomain` throughout.
 
-## 4. Design proposal: the dims list as a topology path
+## 4. Proposal A — the dims list as a topology path
 
 ### 4.1 Core idea
 
@@ -246,19 +247,148 @@ per-connectivity overloads), and "reduce only the innermost" is enforced
 because `Unpack` can only precede a *fixed* tail element — the type system's
 one-`TypeVarTuple` restriction works in our favor here.
 
-## 5. What this fixes
+## 5. Proposal B — order-free: dims as a dependency forest
+
+Proposal A gives the hop segment of the dims list a *semantic order*. If the
+design premise is instead that **dimension order carries no semantics** (dims
+are a set), the dependency must move out of the position and into the
+dimension type itself: every local dimension *names its parent*.
+
+Note that this premise is less radical than it sounds for GT4Py: today
+`check_dims` rejects non-canonically-ordered dims lists, i.e. order is
+already a *normal form*, not information. Proposal B extends that stance
+uniformly; proposal A would carve out an ordered sub-segment as an exception.
+
+### 5.1 Core idea
+
+```
+Field[Dims[Edge]]                                      # ef
+Field[Dims[Vertex, Local[V2E, Vertex]]]                # ef(V2E)
+Field[Dims[Edge, Local[E2V, Edge],
+           Local[V2E, Local[E2V, Edge]]]]              # ef(V2E)(E2V)
+```
+
+`Local[C, P]` is the local dimension induced by connectivity `C`, *depending
+on* parent dimension `P` — where `P` is either a root (non-local) dimension
+or another local dimension. This is exactly the originally suggested
+notation, generalized: `V2EDim[Vertex]` ≙ `Local[V2E, Vertex]`, and after a
+second hop `V2EDim[E2VDim[Edge]]` — the parent of the `V2E` hop is the `E2V`
+*hop* (the position that holds the vertex), which a parent-*dimension*
+annotation alone could not distinguish from the `Vertex` root of another
+field.
+
+The dims collection is a **set**; its elements form a **dependency forest**
+(roots = non-local dims, every local dim points at its parent, all parents
+present). No order is needed because identity and dependency are both carried
+by the types: same-connectivity *chains* stay distinct through their ancestry
+(`Local[V2V, Vertex]` vs `Local[V2V, Local[V2V, Vertex]]`).
+
+### 5.2 Rules
+
+- **Well-formedness**: every local dim's parent is in the set, and the
+  parent's value type (codomain of the parent hop, or the root dim itself)
+  equals the origin of the local dim's connectivity. Acyclicity holds by
+  construction.
+- **Remap (reparenting)**: applying `C: origin O', codomain O` to a field
+  with root `O` replaces the root by `O'`, adds `Local[C, O']`, and
+  **reparents** every dim that referenced `O` onto the new hop:
+  `{O, Local[X, O], ...} → {O', Local[C, O'], Local[X, Local[C, O']], ...}`.
+  (In A, hops never mention the root, so no rewriting is needed — this is
+  the price B pays for referential dependency.)
+- **Reduction (leaf rule)**: a dimension may be reduced iff it is a **leaf**
+  of the forest — no other dimension depends on it. This is the *true
+  operational invariant* behind §2 (a mask/extent is computable exactly while
+  every dimension it depends on is still live); A's LIFO is its
+  linearization. Consequences: on a chain the leaf is unique (same constraint
+  as A); **independent sibling hops commute** — reducing either first is
+  legal and the results agree (§2a, masks both keyed by the live shared
+  parent — also operationally streamable). The `axis=` argument is therefore
+  *required* (there is no "innermost" default), and checked to be a leaf.
+- **Pointwise/broadcast**: dims are matched by type equality (ancestry
+  included), order-free; implementations pick a canonical layout internally.
+  Notably this admits the **sibling product**: `vf(V2E) * wf(V2V)` broadcasts
+  over the shared root to
+  `Field[Dims[Vertex, Local[V2E, Vertex], Local[V2V, Vertex]]]` — for each
+  vertex a (ragged) matrix over its edges × its vertex neighbors. Proposal A
+  cannot *represent* this (a path is linear); under B it falls out of the
+  ordinary broadcast rule.
+
+### 5.3 Costs and limits
+
+- **Verbosity**: ancestry lives in the type; deep chains read poorly without
+  sugar (aliases; rendering such as `V2E@E2V@Edge` in diagnostics).
+- **Same-type siblings collide**: a set cannot hold `Local[V2E, Vertex]`
+  twice, so the *self*-product "edges × edges of the same vertex" needs an
+  explicit disambiguating alias/tag (the same restriction xarray and coordax
+  have via unique dim names). A cannot represent siblings at all, so this is
+  still a net expressiveness gain.
+- **Static layer**: Python's type system has no unordered type collections,
+  so order-free semantics can only be *spelled* in a canonical normal form
+  (proposal: topological — parents before children — with today's
+  kind-then-name rule as tie-breaker). Moreover the reparenting remap is a
+  type-level substitution, which (as with `Dual`, companion doc §4) is not
+  generically expressible — the static layer enumerates *forest shapes*
+  (bounded codegen, one overload per shape) instead of A's simpler push.
+- **ts representation**: `LocalDimension(connectivity, parent)` becomes
+  recursive; `return_type_field` performs the reparenting substitution;
+  `_visit_reduction` checks leaf-ness. Lowering is unchanged relative to A —
+  a topological traversal of the forest gives the loop nest, leaves are the
+  innermost loops — plus rectangular sibling loops for products.
+
+### 5.4 Static (mypy) layer — prototype-verified
+
+[`prototypes/dependent_local_dims/static_forest.py`](prototypes/dependent_local_dims/static_forest.py)
+verifies the encoding for the realistic envelope (chains of depth ≤ 2, two
+siblings): the **reparenting remap** infers the exact nested type for
+`ef(V2E)(E2V)` (including rewriting the existing hop's parent inside the
+result type — expressible per shape because the shape is fixed in each
+overload), the **leaf rule** accepts leaf-then-parent on chains and *both*
+orders on siblings (with exact result types), and reducing the middle of a
+chain is rejected.
+
+## 6. Choosing between A and B
+
+| aspect | A — path | B — forest |
+|---|---|---|
+| order of dims | hops are semantically ordered (LIFO) | no semantics (set + canonical normal form) |
+| dependency encoding | positional (on the prefix) | referential (`Local[C, P]` in the type) |
+| user notation | `Local[V2E]` | `V2EDim[Vertex]`, `V2EDim[E2VDim[Edge]]` |
+| sibling hops / neighborhood products | unrepresentable | supported (incl. commuting reductions) |
+| legal reduction orders | exactly one (innermost) | all orders the dependency structure allows |
+| `axis=` argument | redundant | required, leaf-checked |
+| repeated connectivity | chains ✓ (positional identity) | chains ✓ (ancestry); same-parent siblings need tags |
+| type verbosity | compact | grows with chain depth (sugar needed) |
+| static (mypy) layer | full chain typing via simple push | per-shape overloads incl. reparenting (verified ≤ depth 2) |
+| ts machinery | chain validator; no substitution | recursive parent; reparenting substitution |
+| relation to status quo | introduces an ordered segment | extends "order is a normal form" uniformly |
+
+Assessment: **B is the semantically cleaner model** — the leaf rule is the
+true invariant of §2 and A's LIFO is just its linearization; B is also the
+one consistent with treating dimension order as a normal form everywhere,
+and it unlocks neighborhood products. Its costs are surface verbosity and a
+heavier (but bounded and prototype-verified) static encoding. **A is the
+smaller step** — lighter types, simpler rules — and is exactly the
+restriction of B to linear forests with an implicit axis, so the substantial
+groundwork is shared (single typed connectivity declaration, derived local
+dims and offset tags, nested `ListType` lowering, gathered-mask embedded
+semantics): landing the shared core first keeps the choice open, and a later
+A→B migration is additive.
+
+## 7. What this fixes
+
+Both proposals fix every item; rows where they differ list both.
 
 | Deficiency | Resolution |
 |---|---|
-| dependency of `V2EDim` on `Vertex` unexpressed | implied by `origin(V2E) = Vertex` in the hop type |
-| `edge_field(V2E)(E2V)` rejected | well-typed path `Edge —E2V→ Vertex —V2E→ Edge` |
-| reduction order unexpressed | LIFO pop; wrong order is a type error |
+| dependency of `V2EDim` on `Vertex` unexpressed | implied by `origin(V2E) = Vertex` in the hop type (B: additionally explicit, `V2EDim[Vertex]`) |
+| `edge_field(V2E)(E2V)` rejected | well-typed: A — path `Edge —E2V→ Vertex —V2E→ Edge`; B — forest `{Edge, E2VDim[Edge], V2EDim[E2VDim[Edge]]}` |
+| illegal reduction order undetectable | type error: A — only the innermost hop is reducible (LIFO); B — only forest leaves are reducible |
 | local-dim/offset name string coupling | local dim derived from the connectivity |
 | split declaration (`Dimension` + `FieldOffset`) | single typed connectivity declaration |
-| repeated hop (`V2V` twice) unrepresentable | positional identity in the path |
-| `axis=` argument redundancy | optional (checked) |
+| repeated hop (`V2V` twice) unrepresentable | A — positional identity in the path; B — distinct ancestry |
+| `axis=` argument redundancy | A — optional (checked); B — required (leaf-checked, fits order-free semantics) |
 
-## 6. Open questions
+## 8. Open questions
 
 1. **Multi-hop fields at operator boundaries**: the type can express
    `Field[Dims[Edge, Local[E2V], Local[V2E]]]` as a parameter/return, but the
@@ -281,11 +411,17 @@ one-`TypeVarTuple` restriction works in our favor here.
    `Field[Dims[Vertex, Local[V2E]]]`, e.g. per-edge-of-vertex coefficients):
    supported as today (single-hop sparse fields exist), now with the
    validity source attached by type instead of by name.
-6. **Dynamic offsets / `as_offset`**: out of scope; the path model assumes
+6. **Dynamic offsets / `as_offset`**: out of scope; both models assume
    statically known connectivities (consistent with ADR 0019's
    compile-time `ConnectivityType`).
+7. **(B) Canonical normal form**: exact specification of the topological
+   spelling order (parents before children, kind-then-name tie-break) and
+   whether annotations in non-canonical order are normalized or rejected.
+8. **(B) Disambiguation tags** for same-type siblings (the self-product
+   "edges x edges of one vertex"): alias subclassing vs. an explicit tag
+   parameter; how the tag surfaces in diagnostics and storage names.
 
-## 7. Staged plan
+## 9. Staged plan
 
 1. **U0 — ts `LocalDimension` + chain validator** (inert): represent the
    connectivity in the local dimension, derive the offset tag, keep current
@@ -300,7 +436,13 @@ one-`TypeVarTuple` restriction works in our favor here.
    transforms; gtfn nested-fold codegen; DaCe equivalent; exclusion-matrix
    markers per ADR 0015 until each backend lands.
 
-## 8. Prior art
+Stages U0-U3 are *shared* between proposals A and B (the surface semantics —
+ordered hops vs. forest, implicit vs. required `axis=` — only affects the
+validator and the deduction rules in U0/U2). The A-vs-B decision must be
+taken in the ADR for U0, but an A→B migration later is additive (a path is a
+linear forest).
+
+## 10. Prior art
 
 - **Dex** treats ragged structures with dependent index sets
   (`Fin (deg v)`), validating the Σ-type reading; its tables-indexed-by-pairs
@@ -312,3 +454,7 @@ one-`TypeVarTuple` restriction works in our favor here.
   rectangular; `cmap` cannot vectorize over a dependent extent — promoting
   the dependency into the dimension *type* is precisely what its value-level
   encoding cannot do.
+- **xarray / coordax order-free alignment** is the precedent for proposal
+  B's matching-by-identity (and for its unique-name restriction on
+  same-type siblings); B transplants that model to the *type* level and adds
+  the dependency forest on top.
