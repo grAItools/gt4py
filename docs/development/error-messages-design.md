@@ -291,6 +291,46 @@ The prototype is Stage 1 of the staged plan; the stages are independent.
   caret alignment, and a JSON emitter for IDE/LSP integration — all contained
   in `formatting.py` by construction.
 
+## 7b. Coverage extension: crash-to-diagnostic conversions (Stage 0/1 progress)
+
+A systematic fuzzing pass over typical user mistakes ("write a wrong program,
+see what escapes") converted the following classes of raw Python exceptions
+into structured diagnostics. The regression tests pinning each message live in
+`tests/next_tests/unit_tests/ffront_tests/test_diagnostic_messages.py`.
+
+Definition time (parsing / type deduction):
+
+- `global` / `nonlocal` statements (crashed an AST pass), nested tuple
+  unpacking, unsupported parameter-list features (keyword-only,
+  positional-only, `*args`, `**kwargs`, defaults — previously silently
+  dropped, surfacing as bogus "Undeclared symbol" errors).
+- Attribute access: NumPy-style attributes/methods on fields (`a.T`),
+  unknown module members (`np.sinn`), module members without a DSL type
+  (`np.sin` — with a hint towards the GT4Py built-ins).
+- Subscripts: absolute field indexing (`a[3]`), tuple index out of range,
+  non-local dimension indices (`IDim(3)`).
+- Annotations: unresolvable annotations (`typing.get_type_hints` failures),
+  non-GT4Py parameter annotations (`a: list`, `inp: gtx.Field`), annotated
+  assignments whose annotation cannot be evaluated inside the function.
+- Literals: invalid literals in type constructors (`int32("abc")` — now
+  rejected at definition time, not execution time), out-of-range integers.
+- Programs: non-call statements, calls to programs or plain Python functions,
+  string keys in `domain` dicts; programs called inside field operators.
+
+Call time (embedded execution / program dispatch):
+
+- Direct operator calls validate arguments like program calls do: non-GT4Py
+  types (raw NumPy arrays hint at `gtx.as_field`), wrong dims/dtypes/counts,
+  wrong `out` type, malformed `domain`, non-mapping `offset_provider`.
+- Offset lookups: missing or invalid offset-provider entries (was
+  `KeyError` / `NotImplementedError`).
+- Scan operator attributes (`init=np.zeros(...)`) report the unsupported type.
+
+Python-API constructors (`as_field`, `as_connectivity`, `with_backend`) keep
+raising standard `TypeError`/`ValueError` — they are called from plain Python,
+not DSL code — but now with messages naming the actual problem (unsupported
+dtype, string dimensions, non-integral neighbor table, non-backend object).
+
 ## 8. Open questions
 
 - Should `notes`/`hints` ride on Python 3.11+ `BaseException.__notes__` so
