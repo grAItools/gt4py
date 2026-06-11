@@ -160,8 +160,8 @@ class MissingArgumentError(DSLError):
 
 
 class DSLTypeError(DSLError):
-    def __init__(self, location: Optional[SourceLocation], message: str) -> None:
-        super().__init__(location, message)
+    def __init__(self, location: Optional[SourceLocation], message: str, **kwargs: Any) -> None:
+        super().__init__(location, message, **kwargs)
 
 
 class MissingParameterAnnotationError(DSLTypeError):
