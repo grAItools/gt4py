@@ -224,6 +224,31 @@ def test_function_fields_stay_lazy_on_infinite_intersection():
     np.testing.assert_array_equal(window.asnumpy(), 2 * np.arange(-2, 3) + np.arange(-2, 3) + 1)
 
 
+def test_composed_pointwise_policy(monkeypatch):
+    # the composed result `lambda x: a(x) + b(x)` is universal, not specific to
+    # function fields: with the eager policy off, every pointwise op composes,
+    # whatever data backs the operands, with identical values
+    monkeypatch.setattr(field_data, "EAGER_POINTWISE_ON_FINITE_DOMAINS", False)
+
+    a_values, b_values = np.arange(10.0), np.arange(10.0, 20.0)
+    a = np_field(a_values, -3)  # I=[-3, 7)
+    b = np_field(b_values, 2)  # I=[2, 12)
+    fn = DataField.from_function(lambda i: 100.0 + i, domain={I: None}, dtype=np.float64)
+
+    for lhs, rhs in [(a, b), (a, fn), (fn, a)]:
+        result = lhs + rhs
+        assert isinstance(result._data, FunctionFieldData)
+
+    result = (a + b) * fn  # composition chains; nothing materialized yet
+    assert result.domain == common.domain({I: (2, 7)})
+    expected = (a_values[5:] + b_values[:5]) * (100.0 + np.arange(2, 7))
+    np.testing.assert_array_equal(result.asnumpy(), expected)
+    # and the chain stays correct through a translation premap (domain moves, values don't)
+    shifted = result.premap(common.CartesianConnectivity.for_translation(I, 2))
+    assert shifted.domain == common.domain({I: (0, 5)})
+    np.testing.assert_array_equal(shifted.asnumpy(), expected)
+
+
 def test_truediv_dtype_on_lazy_path():
     f = DataField.from_function(lambda i: i, domain={I: None}, dtype=np.int64)
     result = f / 2

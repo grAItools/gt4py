@@ -59,10 +59,13 @@ Notable consequences observed while battle-testing (see
 - `sub_domain` + `_get_slices_from_domain_slice` of the current `NdArrayField` collapse
   into one absolute-item computation (:func:`_absolute_items`); there is no separate
   "slice the buffer" step in the field layer anymore.
-- Pointwise ops between fields with *infinite* intersection (function op function)
-  cannot be materialized; they naturally stay lazy as a composed
-  :class:`FunctionFieldData`. On finite intersections we materialize eagerly, matching
-  today's `NdArrayField` behavior.
+- Pointwise ops compose uniformly for every data kind: ``a + b`` is
+  ``lambda x: a(x) + b(x)`` (a composed :class:`FunctionFieldData` evaluating the
+  operands via ``gather_values``). On *infinite* intersections this is the only option;
+  on finite ones, materializing eagerly into a buffer (today's `NdArrayField`
+  behavior) is a one-line policy in the shared layer
+  (`EAGER_POINTWISE_ON_FINITE_DOMAINS`), not something the data implementations
+  decide pairwise.
 - A lazy (deferred-materialization) field is just :class:`LazyFieldData` wrapping a
   factory; equivalently it could be a `FunctionFieldData` whose function is the
   ndarray lookup (``lambda *coords: thunk().gather_values(coords, xp)``) -- the class
@@ -621,6 +624,15 @@ def as_data_field(field: common.Field) -> DataField:
     )
 
 
+#: Policy switch for pointwise operations on *finite* domains: materialize eagerly into
+#: a buffer (today's `NdArrayField` semantics) or keep composing functions. This is a
+#: single decision in the shared field layer, orthogonal to the data implementations:
+#: with `False`, `a + b` is always `lambda x: a(x) + b(x)` (via `gather_values`),
+#: whatever kind of data `a` and `b` are. On infinite domains composition is the only
+#: option. Eager is the default to bound expression re-evaluation and memory surprises.
+EAGER_POINTWISE_ON_FINITE_DOMAINS: bool = True
+
+
 def _pointwise(
     op: Callable[..., Any],
     *operands: common.Field | core_defs.Scalar,
@@ -629,9 +641,9 @@ def _pointwise(
     """
     Apply a pointwise array op on the intersection of the operands' domains.
 
-    Finite intersection: materialize and evaluate eagerly (the result is buffer-backed,
-    matching `NdArrayField` semantics). Infinite intersection: compose lazily into a
-    `FunctionFieldData` (not representable with `NdArrayField` today).
+    The composed (function) result is universal; materializing on finite domains is an
+    optimization policy (see `EAGER_POINTWISE_ON_FINITE_DOMAINS`), not a property of
+    the operand data kinds.
     """
     field_operands = [as_data_field(o) for o in operands if isinstance(o, common.Field)]
     assert field_operands
@@ -643,7 +655,7 @@ def _pointwise(
     ]
     domain = embedded_common.domain_intersection(*(f.domain for f in broadcasted))
 
-    if common.Domain.is_finite(domain):
+    if EAGER_POINTWISE_ON_FINITE_DOMAINS and common.Domain.is_finite(domain):
         box = tuple(domain.ranges)
         values = op(*(a.materialize(box, xp) if isinstance(a, FieldData) else a for a in args))
         data: FieldData = NdArrayFieldData(
