@@ -1,6 +1,8 @@
 # User-Friendly DSL Error Messages — Design Document
 
 **Status:** prototype implemented (see "Prototype" below) · **Scope:** `gt4py.next`
+**Assumes:** Python ≥ 3.12 as the supported floor (in particular PEP 678
+`BaseException.add_note`, available since 3.11).
 **Related:** research notes on rustc/Elm-style diagnostics; Shape-Up cycle
 "Enhancements to error reporting"; issue #1031 (missing AST locations).
 
@@ -91,6 +93,29 @@ Subclasses encapsulate message construction so call sites stay declarative:
 "Did you mean ...?" hint itself (via `difflib.get_close_matches`); call sites
 only supply the candidate set they have at hand.
 
+**Late context via the standard `add_note` API (PEP 678, requires ≥ 3.11).**
+Toolchain stages enrich an in-flight error without touching its message:
+
+```python
+try:
+    foast_node = FieldOperatorTypeDeduction.apply(untyped_foast_node)
+except errors.DSLError as err:
+    err.add_note(f"While processing the definition of '{name}'.")
+    raise
+```
+
+This is JAX's "The error occurred while tracing the function f" pattern, but
+through the *standard* exception API — any code holding a `DSLError` can use
+it. `DSLError.add_note` overrides the `BaseException` implementation to route
+the note into the structured `notes` field rather than `__notes__`. The reason
+is mechanical, and was verified experimentally: `traceback` (and therefore
+pytest and IPython/Jupyter, the primary GT4Py environments) renders the
+exception line via `str(err)`, which already contains the structured notes and
+hints — populating `__notes__` as well would print every note twice. The cost
+of this choice is that tools reading `__notes__` directly (e.g. error
+trackers) see only the message; if that ever matters, the renderer — not the
+call sites — is the single place to revisit.
+
 ### 3.2 Rendering (`gt4py.next.errors.formatting`)
 
 One function, `format_diagnostic_parts`, owns the on-screen shape; both
@@ -135,6 +160,8 @@ _UNSUPPORTED_FEATURE_HINTS: dict[type[ast.AST], tuple[str, tuple[str, ...]]] = {
 back to the qualified `ast` class name, so the table can grow incrementally
 and nothing regresses when CPython adds node types. Every entry also gets the
 uniform note "Only a subset of Python is valid inside GT4Py functions."
+With the ≥ 3.12 floor, node types introduced after 3.10 (e.g. `ast.TryStar`)
+can be added as plain entries, without version guards.
 
 This is the maintainability core: **improving the message for one more
 construct is one dict entry plus one UI test** — no renderer or exception
@@ -156,11 +183,17 @@ Pass-level errors attach structure where the pass has it:
   state the no-implicit-conversion rule as a note.
 - `visit_BoolOp` (`and`/`or` on fields) explains *why* (fields hold one
   boolean per grid point) and hints `&`/`|`.
+- The `func_to_foast` toolchain step wraps parsing and type deduction and
+  attaches "While processing the definition of '<name>'." via `add_note` —
+  the template for every later stage (see §3.1).
 
 ## 4. Prototype: before / after
 
 All examples are real output of the prototype (`str(err)`; the excepthook
-prints the same body plus the exception's qualified name).
+prints the same body plus the exception's qualified name). Errors going
+through the `@field_operator` decorator additionally carry the toolchain
+context note shown in the first example; it is omitted from the rest for
+brevity.
 
 **Typo in a variable name** — the most common error of all:
 
@@ -169,6 +202,7 @@ Undeclared symbol 'tmp_feild'.
   File "/tmp/demo_errors.py", line 11
     11 |         return tmp_feild
        |                ^^^^^^^^^ not defined at this point
+  Note: While processing the definition of 'op1'.
   Hint: Did you mean 'tmp_field'?
 ```
 
@@ -283,19 +317,22 @@ The prototype is Stage 1 of the staged plan; the stages are independent.
   renderer.
 - **Stage 3 — lowering-stage attribution.** Errors raised past the frontend
   (GTIR transforms, backends) should re-attach the best-known frontend
-  location at pass boundaries instead of surfacing internal tracebacks; the
-  existing excepthook + `config.VERBOSE_EXCEPTIONS` already provide the
-  JAX-style filtered/full toggle.
+  location at pass boundaries instead of surfacing internal tracebacks. The
+  mechanism exists: catch at the stage boundary, `err.add_note("While ...")`,
+  re-raise (done for `func_to_foast`; extend stage by stage). The existing
+  excepthook + `config.VERBOSE_EXCEPTIONS` already provide the JAX-style
+  filtered/full toggle.
 - **Stage 4 — presentation polish.** Color (gated on TTY and `NO_COLOR`),
   UTF-8-byte→character column conversion for non-ASCII sources, tab-aware
   caret alignment, and a JSON emitter for IDE/LSP integration — all contained
   in `formatting.py` by construction.
 
-## 8. Open questions
+## 8. Resolved and open questions
 
-- Should `notes`/`hints` ride on Python 3.11+ `BaseException.__notes__` so
-  plain tracebacks (without the excepthook) also show them? Today they only
-  appear via `str(err)`/excepthook. (Blocked on dropping 3.10.)
+- **Resolved — `__notes__` vs. structured notes.** With the ≥ 3.12 floor,
+  `add_note` is supported as the public enrichment API, but routed into the
+  structured `notes` field instead of `__notes__` (see §3.1 for the
+  duplication experiment that decided this).
 - Candidate sets for "did you mean": currently the local symbol table;
   including `fbuiltins` names (e.g. `minimun` → `minimum`) would catch another
   frequent class of typos but needs care to not suggest reserved names where

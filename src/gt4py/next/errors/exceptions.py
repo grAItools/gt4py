@@ -23,6 +23,7 @@ import difflib
 from typing import Any, ClassVar, Iterable, Optional, Sequence
 
 from gt4py.eve import SourceLocation
+from gt4py.eve.extended_typing import Self
 from gt4py.next.errors import formatting
 
 
@@ -84,9 +85,23 @@ class DSLError(GT4PyError):
         self.hints = list(hints)
         super().__init__(message)
 
-    def with_location(self, location: Optional[SourceLocation]) -> DSLError:
+    def with_location(self, location: Optional[SourceLocation]) -> Self:
         self.location = location
         return self
+
+    def add_note(self, note: str) -> None:
+        """
+        Add a note to the diagnostic, using the standard 'BaseException.add_note' API.
+
+        Toolchain stages use this to attach context to an in-flight error
+        ("While processing ...") without touching the message.
+
+        The note is routed into the structured 'notes' field instead of
+        '__notes__': the traceback machinery (and IPython/pytest) renders this
+        exception through 'str()', which already includes the structured notes,
+        so storing them in '__notes__' as well would print them twice.
+        """
+        self.notes.append(note)
 
     def __str__(self) -> str:
         return formatting.format_diagnostic_parts(

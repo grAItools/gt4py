@@ -126,6 +126,31 @@ def test_bool_op_suggests_bitwise_operators():
     assert any("'&' and '|'" in hint for hint in err.hints)
 
 
+def test_add_note_renders_once_via_str():
+    # 'add_note' (PEP 678) routes into the structured diagnostic instead of
+    # '__notes__', so the note is rendered exactly once (through 'str()').
+    err = errors.DSLError(None, "A message.")
+    err.add_note("Extra context.")
+
+    assert err.notes == ["Extra context."]
+    assert "Note: Extra context." in str(err)
+    assert "__notes__" not in err.__dict__
+
+
+def test_toolchain_step_attaches_definition_context():
+    from gt4py.next.ffront import stages as ffront_stages
+    from gt4py.next.ffront.func_to_foast import func_to_foast
+
+    def misspelled(temperature: gtx.Field[[IDim], float64]) -> gtx.Field[[IDim], float64]:
+        tmp_field = temperature * 2.0
+        return tmp_feild  # noqa: F821 [undefined-name]
+
+    with pytest.raises(errors.DSLError) as exc_info:
+        func_to_foast(ffront_stages.DSLFieldOperatorDef(definition=misspelled))
+
+    assert "While processing the definition of 'misspelled'." in exc_info.value.notes
+
+
 def test_diagnostic_codes_are_stable():
     assert errors.UndefinedSymbolError.code == "undefined-symbol"
     assert errors.UnsupportedPythonFeatureError.code == "unsupported-syntax"
