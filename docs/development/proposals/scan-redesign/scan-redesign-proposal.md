@@ -4,13 +4,15 @@
 - **Authors**: Hannes Vogt (@havogt), drafted with Claude Code
 - **Created**: 2026-06-11
 - **Updated**: 2026-06-12 (K-local views, inclusive/exclusive scans,
-  icon4py muphys evidence, scan fusion)
+  icon4py muphys evidence, scan fusion; PMAP cartesian evidence: anchored
+  index conditions, partition-based peeling, guard-refined extents,
+  `history` carries)
 - **Companion document**: [scan-redesign-research.md](scan-redesign-research.md)
   (detailed analysis of the current implementation, prior art with sources, and
   the scan + sub-reduce case study);
   [scan-redesign-examples.md](scan-redesign-examples.md) (worked before/after
-  examples, including the muphys decomposition and the sedimentation
-  reference implementations)
+  examples, including the muphys decomposition, the PMAP stride-2
+  tridiagonal solve, and the sedimentation reference implementations)
 
 Why-statement: In the context of vertical recurrences in weather and climate
 models (vertical integrals, tridiagonal solvers, sedimentation), facing an
@@ -249,7 +251,12 @@ definitions, and GridTools fill-type k-caches are the same idea (research
 
 - Offsets are static; the toolchain infers the *vertical extent* per input
   (cartesian-style extent analysis) and the scan range shrinks (or masks) at
-  the column ends accordingly — same rules as `Koff` shifts.
+  the column ends accordingly — same rules as `Koff` shifts. The analysis is
+  *guard-refined*: a read occurring only under an index conditional (§3.3)
+  constrains only the levels where that guard can hold (a `x[-2]` read in a
+  last-level-only branch must not clip the scan at the column start). This
+  matches the precision cartesian gets structurally from per-`interval`
+  code blocks (research §A.8).
 - Inputs are read-only, so **lookahead (`t[+1]`) in a forward scan is
   legal** — muphys's externally precomputed `t_kp1` becomes `t[+1]` in the
   body. Reading *outputs* at an offset stays a carry concern (§4.6).
@@ -309,6 +316,15 @@ _, (z_q_res, w_res) = w_fwd_sweep(
   scan range itself no longer depends on it. Restricting the output below the
   scan range is allowed (compute, then write a sub-range); requesting output
   outside the scan range is an error.
+- Reads guarded by index conditionals (§3.3) contribute *per-region*
+  requirements instead of shrinking the global intersection: an input
+  defined on a sub-range of the scan range is legal as long as every
+  region's reads stay within its domain. The production case is the PMAP
+  back substitution (research §A.8): a full-column scan consuming a
+  temporary defined on one level less, well-formed because the last-level
+  branch reads it only at offset −2. The formal deduction rule (anchors
+  resolve against the range being deduced — a fixpoint) is open question 9;
+  the explicit `k_range` override sidesteps it case by case.
 
 This is a semantic change: today's "scan exactly over the requested output"
 becomes "scan over the defined inputs, write the requested output". For the
@@ -341,6 +357,32 @@ Three complementary mechanisms, ordered by how often we expect them:
    in field-view clothing and reuses an existing builtin. (An earlier draft
    added an `at_level(f, KDim, 0)` accessor to feed first-level values into
    `init`; it is unnecessary — this mechanism covers that case.)
+
+   Two refinements that production cartesian scans demand (research §A.8):
+
+   - **Anchored index expressions.** Conditions (and `k_range` bounds) may
+     reference *both* ends of the scan range: `KDim.start` and `KDim.stop`
+     (strawman spelling), so `concat_where(KDim == KDim.stop - 1, ...)` is
+     the last level and `KDim < KDim.start + 2` the first two. Bare negative
+     indices à la `interval(-1, None)` are not an option — `next` domains
+     may legitimately start at negative indices — so end-relative access
+     must be anchored, not Python-style. Inside a scan body anchors resolve
+     against the scan range; muphys's runtime `last_lev` scalar input
+     (P6) becomes redundant.
+   - **The guarantee is loop partitioning, not first-iteration peeling.**
+     Semantics stays per-level evaluation of the conditional (so columns
+     shorter than the boundary regions remain well-defined); the obligation
+     on the toolchain is: collect all `anchor ± constant` split points
+     appearing in index conditions of the body, partition the scan range
+     into maximal regions on which every condition is statically resolved,
+     and emit one branch-free loop (or peeled iteration) per region. Nested
+     conditionals and multi-level boundary regions at either end fall out of
+     the same partition — this is Dawn interval splitting / Halide loop
+     partitioning (research §B.5, §B.6). Conditions with runtime offsets
+     from an anchor remain legal but fall outside the guarantee (in-loop
+     branch). Extent analysis and range deduction run *per region* (§3.1,
+     §3.2): partitioning is not just a performance transformation, it is
+     what makes guard-refined well-formedness checkable.
 
 2. **Field-valued `init`, optionally emitted — inclusive/exclusive scans.**
    When the boundary value originates *outside* the scanned fields (surface
@@ -464,7 +506,13 @@ users rarely write raw scans:
   (cuSPARSE `gtsv2`-family) or per-column Thomas in registers. Precedent:
   `jax.lax.linalg.tridiagonal_solve`, LFRic's columnwise (CMA) operators
   (research §B.7). This removes the single most awkward scan use case from
-  user code and pins down its numerics.
+  user code and pins down its numerics. It covers the *textbook* case only:
+  production solves are often pre-factored (PMAP, research §A.8, hoists the
+  elimination coefficients out of a GCR iteration and re-runs only the
+  sweeps) or have non-standard structure (stride-2 interleaving); those stay
+  raw-scan territory — which is why the primitive must remain ergonomic for
+  hand-written sweeps. A `factor`/`solve_factored` pair is a possible later
+  library extension.
 - `gtx.lib.windowed_scan(...)` — convenience wrapper combining §3.1 + §3.4
   for bounded-history recurrences.
 
@@ -582,9 +630,12 @@ We considered GTScript-style interval dispatch as API, e.g.
 proven in cartesian. Con: multiplies function definitions for what is usually
 one differing expression; interacts badly with carry typing (every body must
 agree); and `concat_where`-in-body plus field `init` express the same thing
-with existing vocabulary. The peeling *guarantee* (not just optimization) is
-the load-bearing part — it must be stated in the spec and tested, otherwise
-users are back to per-iteration branches.
+with existing vocabulary. The PMAP preconditioner (research §A.8) is
+production evidence of the interval style at its most demanding — five
+intervals across two sweeps — and transcribes to nested anchored
+conditionals without loss (examples §7). The peeling *guarantee* (not just
+optimization) is the load-bearing part — it must be stated in the spec and
+tested, otherwise users are back to per-iteration branches.
 
 ### 4.5 Windows via local dimensions vs dedicated loop construct
 
@@ -597,14 +648,28 @@ small extension to offset declarations. Rejected alternative: a bounded
 `for m in range(M)` loop in the body — more familiar, but introduces general
 loops into the DSL with all their analysis burden, for no added expressivity.
 
-### 4.6 Offset reads of the in-progress output
+### 4.6 Offset reads of the in-progress output: `history` carries
 
 K-local views (§3.1) cover offset reads of *inputs*. For the *in-progress
 output* — GTScript's `field[0,0,-1]` in FORWARD computations, Halide's
-update definitions — we keep offset reads out of the core: the carry covers
-them, and explicit state is easier to type, lower, and differentiate. They
-remain reserved as sugar desugaring to a window carry. Revisit when
-migrating cartesian users.
+update definitions — the core stays first-order: an order-m recurrence is an
+m-tuple carry (research §B.8), which is easier to type, lower, and
+differentiate. But the PMAP preconditioner (research §A.8) shows order > 1
+is not exotic: its forward elimination reads `ff[0,0,-2]`, its back
+substitution `rp[0,0,2]` — two interleaved even/odd chains, as any
+staggered or level-coupled discretization produces — and transcribing that
+with a 2-tuple carry reintroduces for outputs exactly the delay-line idiom
+this proposal eliminates for inputs (`carry = (ff, ff_km1)` where the
+second slot exists only to become "ff two levels ago"). So the sugar is
+part of the design, not a later revisit: `@gtx.scan(..., history=m)`
+presents the carry as a read-only K-local view of the last m carries,
+indexed with axis-relative offsets (`ff[-1]`, `ff[-2]` in a forward scan;
+`rp[+1]`, `rp[+2]` backward); the body returns just the new value (simple
+form: it is also the per-level output; general form: the view is of the
+carry). `init` must then supply m levels (and is structural-only when a
+boundary region seeds the recurrence, as in §3.3 mechanism 1). It desugars
+to the m-tuple carry — no new IR — and lowers to the existing k-cache
+machinery (GridTools flush caches with window m).
 
 ### 4.7 Parallel-in-k: deliberately not in v1
 
@@ -641,7 +706,9 @@ passes.
 3. **Range override syntax.** `k_range=KDim[1:]` vs reusing the domain
    expression API from `concat_where` (`KDim > 0`) vs program-style named
    ranges. Should align with whatever domain-slicing syntax field view
-   converges on.
+   converges on, and share one vocabulary with the `KDim.start`/`KDim.stop`
+   anchors of §3.3 (end-relative bounds like "all but the last level" need
+   them — research §A.8).
 4. **Simple-form detection.** Return-annotation-based (`-> float` vs
    `-> tuple[carry, y]`) is implementable in the traced frontend but subtle
    for tuple carries; an explicit flag (`emit="carry"`) may be safer.
@@ -654,10 +721,20 @@ passes.
    shared local dims, and interaction with `offset_provider` (these are
    compile-time, not runtime, connectivities).
 7. **Naming.** `gtx.scan` vs keeping `scan_operator`; `KView` vs
-   `ColumnView`; `WindowOffset` vs `KWindow`; `gtx.lib` vs `gtx.stdlib`.
+   `ColumnView`; `WindowOffset` vs `KWindow`; `gtx.lib` vs `gtx.stdlib`;
+   `history=` vs `carry_window=` (§4.6); `KDim.start/.stop` vs
+   `gtx.first/last(KDim)` (§3.3).
 8. **NamedCollection carries.** Today's `NamedTuple` carries (muphys's
    nested `IntegrationState`) should keep working in the slice world
    (collections of slices); verify against `arguments.extract` handling.
+9. **Guard-refined range deduction, formally.** §3.1–§3.3 want the scan
+   range to be the maximal range on which every guard-refined read is
+   satisfied, but anchored guards resolve against the very range being
+   deduced — a fixpoint. Existence/uniqueness of that maximum, the error
+   story when a guarded read is unsatisfiable, and when an explicit
+   `k_range` is *required* need a precise spec. The PMAP back substitution
+   (full-column scan over an input defined on one level less, examples §7)
+   is the acceptance test.
 
 ## 6. Consequences
 

@@ -304,6 +304,114 @@ transformation concern). What it costs: correctness now depends on the §3.8
 fusion obligation — five scans sharing `rho`, `zeta`, masks must compile to
 one vertical loop, which is the acceptance test of the rewrite.
 
+## 7. PMAP stride-2 tridiagonal solve (`gt4py.cartesian` migration)
+
+`PMAP-Project/PMAP`, `src/pmap/helmholtz/preconditioner.py` (research §A.8):
+the vertical line solve of a line-relaxation Helmholtz preconditioner,
+applied `nitr` times per call inside a GCR-style iteration. Deliberately not
+textbook Thomas: the coefficients are pre-factored outside the solver (so
+§3.5's `tridiagonal_solve` does not apply), the recurrences are stride-2
+(two interleaved even/odd elimination chains), and there are two-level
+boundary regions at both column ends.
+
+Today (GTScript):
+
+```python
+@stencil
+def _tridiagonal(rs, b33, ee, dnmi, denratm, rp):
+    with computation(FORWARD):
+        with interval(0, 2):
+            ff = rs[0, 0, 0] * dnmi[0, 0, 0]
+        with interval(2, -1):
+            zff = rs[0, 0, 0] + denratm[0, 0, 0] * b33[0, 0, -1] * ff[0, 0, -2]
+            ff = zff * dnmi[0, 0, 0]
+
+    with computation(BACKWARD):
+        with interval(-1, None):
+            rp[0, 0, 0] = (
+                ff[0, 0, -2] * 2.0 * denratm[0, 0, 0] * b33[0, 0, -1] + rs[0, 0, 0]
+            ) * dnmi[0, 0, 0]
+        with interval(-2, -1):
+            rp[0, 0, 0] = ff / (1.0 - ee[0, 0, 0])
+        with interval(0, -2):
+            rp[0, 0, 0] = ee[0, 0, 0] * rp[0, 0, 2] + ff
+```
+
+Proposed (anchored conditions and partition peeling §3.3.1, `history`
+carries §4.6, K-local views §3.1; transcribed for structure, not validated):
+
+```python
+@gtx.scan(axis=KDim, forward=True, history=2)
+def fwd_elim(
+    ff: gtx.KView[float], rs: float, dnmi: float, denratm: float, b33: gtx.KView[float]
+) -> float:
+    # ff is the carry-history view (§4.6): ff[-2] = own output two levels up
+    return concat_where(
+        KDim < KDim.start + 2,
+        rs * dnmi,
+        (rs + denratm * b33[-1] * ff[-2]) * dnmi,
+    )
+
+
+@gtx.scan(axis=KDim, forward=False, history=2)
+def back_subst(
+    rp: gtx.KView[float],
+    ff: gtx.KView[float],
+    ee: float,
+    rs: float,
+    dnmi: float,
+    denratm: float,
+    b33: gtx.KView[float],
+) -> float:
+    return concat_where(
+        KDim == KDim.stop - 1,
+        (ff[-2] * 2.0 * denratm * b33[-1] + rs) * dnmi,
+        concat_where(
+            KDim == KDim.stop - 2,
+            ff[0] / (1.0 - ee),
+            ee * rp[+2] + ff[0],
+        ),
+    )
+
+
+@gtx.field_operator
+def tridiagonal(rs: IJKF, b33: IJKF, ee: IJKF, dnmi: IJKF, denratm: IJKF) -> IJKF:
+    ff = fwd_elim(rs, dnmi, denratm, b33, init=0.0, k_range=KDim[:-1])
+    return back_subst(ff, ee, rs, dnmi, denratm, b33, init=0.0)
+```
+
+(`init` is structural in both scans — the peeled boundary regions seed the
+chains, so it is never read and backends drop it. The `k_range` spelling
+for "all but the last level" is open question 3.)
+
+What this exercises beyond the earlier examples:
+
+- **End-anchored conditions** (`KDim == KDim.stop - 1`, `KDim.stop - 2`):
+  four of the five boundary regions are end-relative; GTScript spells them
+  `interval(-1, None)` / `interval(-2, -1)`, muphys smuggles a runtime
+  `last_lev` scalar in — anchors replace both.
+- **Multi-level, nested peels**: a two-level region with one body at the
+  start of the forward scan; two single-level regions with *different*
+  bodies at the start of the backward scan, written as nested
+  `concat_where`. The §3.3.1 partition guarantee must produce three
+  branch-free loop sections for `back_subst`, not "peel the first
+  iteration".
+- **Guard-refined extents** (§3.1, §3.2, open question 9): `b33[-1]` is
+  read only where `KDim >= KDim.start + 2` holds, so it must not clip the
+  forward scan at the column start; `ff` is defined on one level less than
+  the backward scan range, legal because the last-level branch reads only
+  `ff[-2]`. A global extent analysis over all branches would reject both.
+- **`history` carries** (§4.6): the stride-2 recurrences read the scan's
+  own output at offset −2 (forward) / +2 (backward); `history=2` expresses
+  them without hand-threading `(ff, ff_km1)` delay-line tuples.
+- **Pre-factored solve**: `dnmi`, `ee`, `denratm` are factored once outside
+  the GCR loop; only the sweeps re-run. The raw primitive, not
+  `gtx.lib.tridiagonal_solve`, carries this case (§3.5).
+- **Opposite-direction pair**: `ff` is materialized between the two scans,
+  exactly as the GTScript 3D temporary is today — no regression, and a
+  concrete instance of the fusion question (proposal §5.5: opposing
+  directions are "attempted", not guaranteed).
+
 ## Appendix: sedimentation reference implementations
 
 Transcribed from https://gist.github.com/havogt/c52d19f2f7557c2c048d12be7330bda8
