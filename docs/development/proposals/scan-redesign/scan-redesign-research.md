@@ -119,6 +119,85 @@ runtime branches — and backends (GridTools) implement them as split k-loops
 with k-caches. This is the proven UX target for boundary handling; what it
 lacks is the explicit carry/init story and any array-ecosystem interop.
 
+### A.7 Production evidence: icon4py muphys and microphysics
+
+Survey of `C2SM/icon4py` at commit `515763c` (2026-06-12),
+https://github.com/C2SM/icon4py — the largest production users of
+`scan_operator`. GitHub code search finds 8 `scan_operator` uses repo-wide;
+the two microphysics packages dominate.
+
+**muphys** (`model/atmosphere/subgrid_scale_physics/muphys/`, port of the
+one-moment "muphys" scheme): exactly one scan, `_precip_and_t` in
+`implementations/graupel.py`, and it is the canonical *fused* scan:
+
+- **Carry**: nested NamedTuples (`IntegrationState` containing four
+  `PrecipStateQx(x, p, vc, activated)` — rain/snow/ice/graupel — plus
+  `TempState(t, eflx, activated)`, `rho`, `pflx_tot`), i.e. **21 scalar
+  components**. Body signature: carry + 10 arguments (one a 6-component `Q`
+  NamedTuple) = 15 scalar inputs, four of them precomputed per-level boolean
+  mask fields (`kmin_r = q.r > qmin` etc., built outside as `CellKField[bool]`).
+- **Five recurrences in one scan**: the four species sedimentation
+  recurrences are mutually independent (each reads only its own carry slot
+  plus shared `rho`/`zeta`); they are instantiated from a helper
+  `precip_qx_level_update(previous_level_q, previous_level_rho, prefactor, exponent, offset, …)` called four times with per-species constants — a
+  hand-made abstraction for "one species' scan body". The fifth recurrence
+  (temperature/energy flux) couples to the others only through *same-level*
+  outputs (`pr=r_update.p`, `pflx_tot=s_update.p + i_update.p + g_update.p`).
+  Nothing about the physics requires one scan; the construct does.
+- **Carry as workaround channel**: of 21 components, `t_state.t` and
+  `pflx_tot` are never read from `previous_level` — pure output channels
+  (carry == output). `rho` is carried solely as a **delay line**: the flux
+  average needs ρ at k−1 and a scan body cannot read an input at an offset.
+  The symmetric problem — lookahead — is solved *outside* the scan:
+  `t_kp1 = concat_where(dims.KDim < last_lev, t(Koff[1]), t)` precomputed
+  and passed as an extra input.
+- **Scalar-body tax**: `core/properties.py` / `core/thermo.py` maintain
+  duplicated `*_scalar` twins of field operators (`_fall_speed_scalar`,
+  docstring "Compute the scalar fall speed (can be used in scan operator)";
+  `_T_from_internal_energy_scalar`, "scalar version callable from
+  scan_operator") — and the scan body *still* manually inlines one "in order
+  to avoid scan_operator -> field_operator" (graupel.py:155).
+- **Work-skipping branch**: the body wraps everything in
+  `if current_level_activated:` with an identity else-branch, annotated
+  `# TODO(): … Can be made unnecessary with future transformations.`
+  (graupel.py:217). The identity branch generates per-level self-copies that
+  ~650 lines of hand-written DaCe hooks
+  (`implementations/graupel_dace_hooks.py`: `remove_self_copy_inside_scan`,
+  `rename_intermediate_access_nodes`) exist to repair, plus in/out buffer
+  aliasing flagged "not best GT4Py practice".
+- **Surface outputs by program slicing**: `pr, ps, pi, pg, pre` are written
+  with `dims.KDim: (vertical_end - 1, vertical_end)` domains in the
+  `@gtx.program` and allocated as single-level fields — i.e. the *final
+  carry*, extracted manually.
+- **Tracing scale**: drivers wrap execution in a `recursion_limit(10**4)` /
+  `(10**5)` context manager, "TODO(havogt): make an option in gt4py?".
+
+**Old microphysics** (`microphysics/stencils/graupel_stencils.py`,
+`_icon_graupel_scan`): the same pattern without the NamedTuple hygiene — a
+**flat 28-tuple carry** preceded by `sys.setrecursionlimit(350000)`
+("The limit has to be manually set to a huge value for a big scan
+operator"). Carry slots include five `*_kup` caches of previous-level
+*derived* values (`rho_kup`, `qvsw_kup`, …— delay lines again), four fall
+speeds, an explicit level counter (`k_lev = k_lev + 1`) used for
+`is_surface = True if k_lev == ground_level else False` branching at four
+places, and `cloud top distance`. The wrapper field operator unpacks all 28
+outputs and **discards 13 of them with `_`**. Ground fluxes are computed by
+two separate post-scan field operators over sliced domains
+(`(ground_level, num_levels)` / `(model_top, ground_level)`) consuming the
+scan's by-product outputs.
+
+**Other icon4py scans** (completing the survey): `diagnose_pressure.py` —
+backward scan, carry `(pressure, pressure_interface, is_first_level: bool)`
+with the bool as first-iteration flag and one slot never read back;
+`metric_fields.py::_compute_param` — carry `(gtx.int32, bool)` maintaining a
+hand-rolled k counter purely to compare against level bounds;
+`solve_tridiagonal_matrix_for_w_{forward_sweep,back_substitution}.py` —
+clean, natural Thomas-algorithm scans (carry `(c', d')` / scalar), the
+motivating case for a `tridiagonal_solve` primitive (§B.7).
+
+Implications fed back into the proposal: P6, goals 6–7, K-local views
+(§3.1), final-carry surface outputs, and the scan-fusion obligation (§3.8).
+
 ## B. Prior art
 
 ### B.1 JAX
@@ -179,6 +258,16 @@ Sources:
   a general scan must remain a GT4Py-level construct.
 - NumPy's `np.ufunc.accumulate` generalizes only over binary ufuncs; custom
   Python ufuncs run at interpreter speed.
+- **Inclusive/exclusive duality.** With `y[k] = f(y[k-1], x[k])`: the
+  *inclusive* scan emits the carry after consuming `x[k]`; the *exclusive*
+  scan emits the carry before (so `y[k0] = init`, and
+  `exclusive[k] = inclusive[k-1]`); `include_initial=True` is "inclusive
+  plus the init emitted one level upstream", subsuming both
+  (exclusive = include_initial minus the last level). For NWP this duality
+  *is* the cell-center/interface staggering: n cell increments integrate to
+  n+1 interface values whose first entry is the boundary condition. It also
+  reframes the "boundary condition at the first level" idiom: `y[0] = bc; y[k] = f(y[k-1], x[k])` is precisely an inclusive scan over `[1, n)` with
+  its init emitted at 0 — one primitive, no special case (proposal §3.3).
 
 Sources:
 
@@ -321,6 +410,17 @@ Sources:
   (`f[0,0,-1]`, `f(x-2)`) with k-caches/registers making the window fast —
   the ergonomic alternative surface syntax; the compiler infers the
   equivalent carry depth.
+- **Local-view precedent inside gt4py itself**: at the ITIR level the scan
+  pass already receives *iterators*, not values — they can be shifted and
+  dereferenced (see the scan in
+  `tests/next_tests/unit_tests/iterator_tests/transforms_tests/test_domain_inference.py`,
+  whose pass is `λ(init, it). deref(shift("Ioff", 1)(it))`). Only the ffront
+  `scan_operator` flattens arguments to scalars. A K-local-view body
+  (proposal §3.1) therefore maps onto the *existing* IR; GridTools fill-type
+  k-caches (§B.6) are the corresponding execution mechanism. This also
+  resolves the asymmetry that read-only inputs admit *lookahead* (`x[+1]` in
+  a forward scan — used by muphys via external precomputation, §A.7) which
+  no carry encoding can express.
 - Merrill & Garland, *Single-pass Parallel Prefix Scan with Decoupled
   Look-back* (NVIDIA NVR-2016-002,
   https://research.nvidia.com/sites/default/files/pubs/2016-03_Single-pass-Parallel-Prefix/nvr-2016-002.pdf)
@@ -501,15 +601,19 @@ gist's `box_sedim_naive_func` with the window machinery absorbing
 
 ## D. Synthesis: design drivers
 
-| #   | Finding                                                                                                                                   | Source                                       | Consequence in proposal                            |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- | -------------------------------------------------- |
-| 1   | Ecosystem converged on `(carry, x) → (carry, y)` with explicit `init`, `reverse`                                                          | §B.1, §B.3                                   | §3.1 signature; JAX-lowerable embedded             |
-| 2   | Slice-level bodies make batching/vectorization implicit and kill promotion magic                                                          | §B.1 (vmap), §B.6 (LFRic)                    | §3.1 slice typing; §4.1                            |
-| 3   | Only `cumsum`/`cumprod` are portable array-API scans; general scan stays a DSL construct                                                  | §B.2                                         | §3.5 library lowering; embedded keeps a k-loop     |
-| 4   | General scans are hard to compile; keep core semantics sequential and simple                                                              | §B.3, §B.4                                   | §2 non-goals; §4.7                                 |
-| 5   | Interval/vertical regions + loop partitioning are the proven BC mechanism; init-as-state the proven seeding mechanism                     | §B.5, §B.6, §B.9                             | §3.3 three-mechanism design with peeling guarantee |
-| 6   | Sequential-k / parallel-columns is the production GPU model; parallel-in-k is a later scheduling concern                                  | §B.6 (ICON, GridTools), §B.5 (rfactor), §B.4 | §2, §4.7                                           |
-| 7   | Tridiagonal solve should be a named primitive, not a user scan                                                                            | §B.7                                         | §3.5                                               |
-| 8   | Order-m recurrences = first-order scan + m-carry; offset-output reads are sugar over it                                                   | §B.8                                         | §4.6                                               |
-| 9   | Bounded scan+sub-reduce = windowed stencil (+ separate cumsum); ring buffers are a compiler optimization, boundary `if`s are skip-masking | §C.2                                         | §3.4 `WindowOffset` reusing sparse-field machinery |
-| 10  | Data-dependent extents trade vectorization for work-efficiency; production vector codes use masked bounds                                 | §C.1, §C.4                                   | §4.8 rejection of `while`-scans                    |
+| #   | Finding                                                                                                                                             | Source                                       | Consequence in proposal                            |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- | -------------------------------------------------- |
+| 1   | Ecosystem converged on `(carry, x) → (carry, y)` with explicit `init`, `reverse`                                                                    | §B.1, §B.3                                   | §3.1 signature; JAX-lowerable embedded             |
+| 2   | Slice-level bodies make batching/vectorization implicit and kill promotion magic                                                                    | §B.1 (vmap), §B.6 (LFRic)                    | §3.1 slice typing; §4.1                            |
+| 3   | Only `cumsum`/`cumprod` are portable array-API scans; general scan stays a DSL construct                                                            | §B.2                                         | §3.5 library lowering; embedded keeps a k-loop     |
+| 4   | General scans are hard to compile; keep core semantics sequential and simple                                                                        | §B.3, §B.4                                   | §2 non-goals; §4.7                                 |
+| 5   | Interval/vertical regions + loop partitioning are the proven BC mechanism; init-as-state the proven seeding mechanism                               | §B.5, §B.6, §B.9                             | §3.3 three-mechanism design with peeling guarantee |
+| 6   | Sequential-k / parallel-columns is the production GPU model; parallel-in-k is a later scheduling concern                                            | §B.6 (ICON, GridTools), §B.5 (rfactor), §B.4 | §2, §4.7                                           |
+| 7   | Tridiagonal solve should be a named primitive, not a user scan                                                                                      | §B.7                                         | §3.5                                               |
+| 8   | Order-m recurrences = first-order scan + m-carry; offset-output reads are sugar over it                                                             | §B.8                                         | §4.6                                               |
+| 9   | Bounded scan+sub-reduce = windowed stencil (+ separate cumsum); ring buffers are a compiler optimization, boundary `if`s are skip-masking           | §C.2                                         | §3.4 `WindowOffset` reusing sparse-field machinery |
+| 10  | Data-dependent extents trade vectorization for work-efficiency; production vector codes use masked bounds                                           | §C.1, §C.4                                   | §4.8 rejection of `while`-scans                    |
+| 11  | Production scans degenerate into mega-operators: manual fusion, delay-line/pass-through carry slots, `*_scalar` helper twins, bespoke backend hooks | §A.7                                         | P6; goals 6–7; §3.8 fusion obligation              |
+| 12  | Previous-level *and* lookahead input access is real demand; carry delay lines and external pre-shifts are the workarounds                           | §A.7, §B.8                                   | §3.1 K-local views ("local view vertically")       |
+| 13  | Inclusive/exclusive/`include_initial` unify first-level BCs with staggered outputs                                                                  | §B.2                                         | §3.3 mechanism 2; `gtx.lib` wrappers               |
+| 14  | Surface diagnostics are final carries, today extracted by last-level program slicing                                                                | §A.7                                         | §3.1 `(final_carry, ys)` return                    |
