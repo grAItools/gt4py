@@ -6,13 +6,16 @@
 - **Updated**: 2026-06-12 (K-local views, inclusive/exclusive scans,
   icon4py muphys evidence, scan fusion; PMAP cartesian evidence: anchored
   index conditions, partition-based peeling, guard-refined extents,
-  `history` carries)
+  `history` carries; vertical reductions and the fold form,
+  physics_patterns evidence: level searches, variable-depth masks,
+  `gtx.index`, SHiELD scatter boundary)
 - **Companion document**: [scan-redesign-research.md](scan-redesign-research.md)
   (detailed analysis of the current implementation, prior art with sources, and
   the scan + sub-reduce case study);
   [scan-redesign-examples.md](scan-redesign-examples.md) (worked before/after
   examples, including the muphys decomposition, the PMAP stride-2
-  tridiagonal solve, and the sedimentation reference implementations)
+  tridiagonal solve, the physics_patterns level-search and variable-depth
+  patterns, and the sedimentation reference implementations)
 
 Why-statement: In the context of vertical recurrences in weather and climate
 models (vertical integrals, tridiagonal solvers, sedimentation), facing an
@@ -24,7 +27,9 @@ primitive with `jax.lax.scan`-compatible semantics — explicit `init`
 output, scan range deduced from *inputs* with explicit override — with
 scanned inputs presented as *K-local views* (relative level access without
 delay-line carries), plus a *vertical window* construct that covers
-scan + sub-reduce algorithms, and scan fusion as a toolchain obligation. We
+scan + sub-reduce algorithms, fixed-op *vertical reductions* (column
+integrals, level searches) whose general form is the scan's final carry,
+and scan fusion as a toolchain obligation. We
 considered keeping the scalar body, whole-column kernels, and GTScript-style
 interval dispatch, and we accept that data-dependent per-column control flow
 inside the scan body must be expressed with `where` instead of Python `if`.
@@ -118,6 +123,14 @@ companion document, §A):
   in-carry level counter, `sys.setrecursionlimit(350000)`, and 13 of 28
   outputs discarded at the call site.
 
+- **P7 — No vertical reductions at all.** Field view reduces only over
+  *local* (neighbor) dimensions; a column integral, a column maximum
+  (vertical CFL), or a level search (tropopause, cloud top, PBL height)
+  must be written as a scan with accumulator/flag/counter carries emitting
+  a full 3D field — or escapes to host-side NumPy entirely (every icon4py
+  `max_over`/`min_over`/`neighbor_sum` use is over a neighbor dimension;
+  column diagnostics live outside stencils). Evidence: research §A.9.
+
 ## 2. Goals and non-goals
 
 Goals:
@@ -137,6 +150,8 @@ Goals:
    toolchain obligation — so nobody is forced to write a 21-component carry
    again.
 8. A migration path: the old `scan_operator` expressible as sugar on top.
+9. Column reductions — integrals, min/max, level searches
+   (arg-reductions) — as one-liners, without scan boilerplate (P7).
 
 Non-goals (explicitly out of scope for the first iteration, see §4.7–4.8):
 
@@ -147,6 +162,8 @@ Non-goals (explicitly out of scope for the first iteration, see §4.7–4.8):
 - Data-dependent trip counts (`while`-scans, early exit). Bounded, masked
   windows cover the known use cases on GPU-friendly terms.
 - Distributed scans. The vertical axis is never distributed in our models.
+- Horizontal or global reductions (mesh-wide sums, inner products,
+  distributed-memory reductions). Only the vertical axis is in scope here.
 
 ## 3. Proposed design
 
@@ -204,6 +221,11 @@ Semantics and type rules:
   (`(carry, x) -> carry`) is interpreted as `y = carry'`, and the call returns
   just `ys`. This is the migration target for today's `scan_operator` and
   covers the dominant carry-is-output case without boilerplate.
+- **Fold form (the dual).** When only the final carry is consumed and the
+  per-level output is dead, the toolchain must not materialize `ys` — the
+  mirror image of P3's dummy outputs. A reduction-only scan (research §A.9
+  tropopause argmin) writes k-less fields. This is the general sequential
+  reduction — order-pinned, arbitrary combine — underlying §3.9.
 
 #### Typing of body arguments, and access to neighbouring levels
 
@@ -564,7 +586,12 @@ are not viable: users fuse by hand. The design response has four parts:
    redesign turns this from incidental into specified: *the muphys
    decomposition — four species scans plus one temperature scan, written
    separately — must compile to a single vertical loop*. That statement
-   belongs in the acceptance tests of the rewrite.
+   belongs in the acceptance tests of the rewrite. The obligation extends
+   to scan → reduction chains over the same axis and range (§3.9): a
+   parcel-ascent scan followed by a masked column integral (CAPE) is one
+   k-loop with an extra accumulator — Futhark's `screma`/`redomap` IR
+   (research §B.10) is the precedent that a fused map+scan+reduce column
+   executor is standard compiler technology.
 3. **Surface outputs are final carries.** muphys extracts `pr, ps, pi, pg, pre` by slicing the last level of full-column outputs at the program
    level; with §3.1 these are simply components of the returned final carry
    (k-less fields), allocated as such.
@@ -577,6 +604,71 @@ are not viable: users fuse by hand. The design response has four parts:
    optimizations (including "else-branch is identity" detection) move into
    the toolchain, where the muphys TODO already wants them ("Can be made
    unnecessary with future transformations").
+
+### 3.9 Vertical reductions and the fold form
+
+Field view today reduces only over local dimensions (P7). The missing
+vertical reduction splits into two tiers, following the ecosystem split
+(research §B.10):
+
+1. **The general sequential fold is already in the design**: a scan whose
+   per-level output is discarded, returning only the final carry (§3.1
+   fold form). Order-pinned, arbitrary data-dependent combine,
+   bit-reproducible by construction. muphys's surface fluxes are this
+   (§3.8 point 3).
+2. **Fixed-op reductions** are added as dimension-removing builtins over a
+   non-local axis: `sum`, `max`, `min` (extending — or renaming, open
+   question 10 — `neighbor_sum`/`max_over`/`min_over`), plus `argmin`,
+   `argmax`, `any`, `all`. No user-defined combine function: for a custom
+   combine, write the fold. This mirrors the array API standard, which
+   offers every fixed-op reduction but no general `reduce`/`scan`
+   (research §B.2, §B.10), and gives embedded execution a one-call
+   `xp.sum(...)` lowering — an even better story than the scan's
+   per-level loop.
+
+```python
+twv = gtx.sum(qv * rho * dz, axis=KDim)  # column integral: Field[[Cell], float]
+itpl = gtx.argmin(t, axis=KDim)  # level search: Field[[Cell], int32]
+rcs = gtx.sum(  # masked, per-column variable depth (research §A.9)
+    where(gtx.index(KDim) < nroot, dz * gx, 0.0), axis=KDim
+)
+```
+
+Semantics and design points:
+
+- **Order is unspecified** (association may differ per backend) — the XLA
+  `Reduce` contract; NumPy's `sum` itself is pairwise. In practice
+  compiled backends accumulate sequentially in the existing vertical
+  executor (GridTools has no reduction construct — a column sum *is* a
+  forward k-accumulation, research §B.10), so only the embedded array
+  path may reassociate. Codes that must pin the order write the fold
+  (tier 1) — the same answer PSyclone gives with its
+  reproducible-reduction option.
+- **Range rules are §3.2's**: reduce over the input's K-range, `k_range`
+  override, guard refinement as in scans. The output loses the K
+  dimension.
+- **`gtx.index(KDim)` — the level index as a value.** Required for masked
+  variable-depth reductions (`k < nroot`, PBL heights; research §A.9) and
+  for writing arg-reductions as raw folds; also useful in scan bodies
+  (the argmin carry `(t_min, k)`). GTIR already has the `index(dim)`
+  builtin (`iterator/builtins.py`); only the ffront exposure is missing.
+  Anchored conditions (§3.3) remain the tool for *static* boundary
+  dispatch; `gtx.index` is for *data-dependent* level arithmetic.
+
+**Combined scan + reduce.** Four compositions, none a new user construct:
+
+| Composition                  | Example                                           | Answer                              |
+| ---------------------------- | ------------------------------------------------- | ----------------------------------- |
+| fold as result               | muphys surface fluxes                             | final carry (tier 1)                |
+| reduce over a scan's output  | CAPE: parcel scan emits buoyancy; masked integral | compose; §3.8 fuses into one k-loop |
+| reduce feeding a scan        | column total used per level                       | two passes (true dependence)        |
+| bounded sub-reduce in a scan | sedimentation                                     | §3.4 windows                        |
+
+The IR-level target for the second row is a column executor hosting scan
+*and* reduction channels in one vertical loop — Futhark's `screma` (fused
+scan-reduce-map, with `redomap`/`scanomap` as special cases) is the
+precedent (research §B.10); GTFN's `ScanExecution` (which already merges
+scans) grows reduce slots, DaCe adds loop-region accumulators.
 
 ## 4. Discussion: decisions, pros and cons, alternatives
 
@@ -693,55 +785,74 @@ use anyway (the paper's own NEC-vectorized variant effectively does this).
 Users with genuinely unbounded extents pre-chunk or fall back to multiple
 passes.
 
+The SHiELD melting pattern (research §A.9) marks the documented boundary
+of this rejection: an inner data-dependent m-loop with `break`s, scatter
+updates at both k and m, and sequential feedback in *both* loops
+(`qice[k]` exhausted across the inner loop, `temperature[m]` re-read by
+later k iterations). It is not reformulable as a masked bounded-window
+gather without changing the algorithm — the order-dependent `min` caps
+read intermediate state. The honest answer stays: reformulate (what
+COSMO's boxtracking did for the same physics, research §C.1) or, if such
+patterns accumulate during migration, revisit the §4.1-rejected
+whole-column kernel as an explicit escape hatch rather than stretching
+the scan.
+
 ## 5. Open questions
 
-1. **K-view annotation spelling and honesty.** `gtx.KView[float]` strawman;
-   whether the `x: float` auto-deref sugar (§3.1) keeps annotations honest
-   enough for frontend style, or whether views should be mandatory in
-   signatures whenever offsets are used.
-2. **Staggered outputs of `include_initial`.** The emitted-init level
-   produces n+1 outputs from n inputs — interface vs cell-center fields.
-   How this interacts with half-level dimensions (icon4py's `KHalfDim`
-   practice) and with §3.2 range deduction needs a dedicated design.
-3. **Range override syntax.** `k_range=KDim[1:]` vs reusing the domain
-   expression API from `concat_where` (`KDim > 0`) vs program-style named
-   ranges. Should align with whatever domain-slicing syntax field view
-   converges on, and share one vocabulary with the `KDim.start`/`KDim.stop`
-   anchors of §3.3 (end-relative bounds like "all but the last level" need
-   them — research §A.8).
-4. **Simple-form detection.** Return-annotation-based (`-> float` vs
-   `-> tuple[carry, y]`) is implementable in the traced frontend but subtle
-   for tuple carries; an explicit flag (`emit="carry"`) may be safer.
-5. **Fusion guarantees.** §3.8 makes scan fusion an obligation — but spec
-   or best-effort? Which compositions are *guaranteed* (same range/direction,
-   same-level coupling) vs merely attempted (different ranges, opposing
-   directions as in Thomas forward+backward)? Needs to be pinned before
-   users rely on decomposed scans being performance-neutral.
-6. **Window declaration ergonomics.** Final spelling of `WindowOffset`,
-   shared local dims, and interaction with `offset_provider` (these are
-   compile-time, not runtime, connectivities).
-7. **Naming.** `gtx.scan` vs keeping `scan_operator`; `KView` vs
-   `ColumnView`; `WindowOffset` vs `KWindow`; `gtx.lib` vs `gtx.stdlib`;
-   `history=` vs `carry_window=` (§4.6); `KDim.start/.stop` vs
-   `gtx.first/last(KDim)` (§3.3).
-8. **NamedCollection carries.** Today's `NamedTuple` carries (muphys's
-   nested `IntegrationState`) should keep working in the slice world
-   (collections of slices); verify against `arguments.extract` handling.
-9. **Guard-refined range deduction, formally.** §3.1–§3.3 want the scan
-   range to be the maximal range on which every guard-refined read is
-   satisfied, but anchored guards resolve against the very range being
-   deduced — a fixpoint. Existence/uniqueness of that maximum, the error
-   story when a guarded read is unsatisfiable, and when an explicit
-   `k_range` is *required* need a precise spec. The PMAP back substitution
-   (full-column scan over an input defined on one level less, examples §7)
-   is the acceptance test.
+01. **K-view annotation spelling and honesty.** `gtx.KView[float]` strawman;
+    whether the `x: float` auto-deref sugar (§3.1) keeps annotations honest
+    enough for frontend style, or whether views should be mandatory in
+    signatures whenever offsets are used.
+02. **Staggered outputs of `include_initial`.** The emitted-init level
+    produces n+1 outputs from n inputs — interface vs cell-center fields.
+    How this interacts with half-level dimensions (icon4py's `KHalfDim`
+    practice) and with §3.2 range deduction needs a dedicated design.
+03. **Range override syntax.** `k_range=KDim[1:]` vs reusing the domain
+    expression API from `concat_where` (`KDim > 0`) vs program-style named
+    ranges. Should align with whatever domain-slicing syntax field view
+    converges on, and share one vocabulary with the `KDim.start`/`KDim.stop`
+    anchors of §3.3 (end-relative bounds like "all but the last level" need
+    them — research §A.8).
+04. **Simple-form detection.** Return-annotation-based (`-> float` vs
+    `-> tuple[carry, y]`) is implementable in the traced frontend but subtle
+    for tuple carries; an explicit flag (`emit="carry"`) may be safer.
+05. **Fusion guarantees.** §3.8 makes scan fusion an obligation — but spec
+    or best-effort? Which compositions are *guaranteed* (same range/direction,
+    same-level coupling) vs merely attempted (different ranges, opposing
+    directions as in Thomas forward+backward)? Needs to be pinned before
+    users rely on decomposed scans being performance-neutral.
+06. **Window declaration ergonomics.** Final spelling of `WindowOffset`,
+    shared local dims, and interaction with `offset_provider` (these are
+    compile-time, not runtime, connectivities).
+07. **Naming.** `gtx.scan` vs keeping `scan_operator`; `KView` vs
+    `ColumnView`; `WindowOffset` vs `KWindow`; `gtx.lib` vs `gtx.stdlib`;
+    `history=` vs `carry_window=` (§4.6); `KDim.start/.stop` vs
+    `gtx.first/last(KDim)` (§3.3).
+08. **NamedCollection carries.** Today's `NamedTuple` carries (muphys's
+    nested `IntegrationState`) should keep working in the slice world
+    (collections of slices); verify against `arguments.extract` handling.
+09. **Guard-refined range deduction, formally.** §3.1–§3.3 want the scan
+    range to be the maximal range on which every guard-refined read is
+    satisfied, but anchored guards resolve against the very range being
+    deduced — a fixpoint. Existence/uniqueness of that maximum, the error
+    story when a guarded read is unsatisfiable, and when an explicit
+    `k_range` is *required* need a precise spec. The PMAP back substitution
+    (full-column scan over an input defined on one level less, examples §7)
+    is the acceptance test.
+10. **Vertical-reduction spelling and order.** Extend
+    `neighbor_sum`/`max_over`/`min_over` to non-local axes vs new
+    `gtx.sum`/`gtx.max`/`gtx.min`; the `gtx.index(KDim)` exposure; and
+    whether unspecified association needs an explicit opt-in/opt-out
+    flag, or whether "write the fold" suffices as the reproducibility
+    story (§3.9).
 
 ## 6. Consequences
 
 Easier: writing and reading vertical solvers (no flag-in-carry idioms, no
 delay lines, no `*_scalar` helper twins); embedded debugging at realistic
 sizes; JAX differentiation of vertical physics; expressing
-sedimentation/PPM declaratively; reasoning about scan domains; decomposing
+sedimentation/PPM declaratively; column diagnostics (integrals, level
+searches) as one-liners; reasoning about scan domains; decomposing
 muphys-scale schemes into per-process scans without a performance penalty
 (given §3.8). Tracing also shallows out: slice bodies calling field
 operators replace the deeply recursive scalar expansion behind icon4py's

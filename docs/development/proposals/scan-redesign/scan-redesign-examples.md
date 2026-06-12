@@ -412,6 +412,79 @@ What this exercises beyond the earlier examples:
   concrete instance of the fusion question (proposal §5.5: opposing
   directions are "attempted", not guaranteed).
 
+## 8. Tropopause inversion + mixing length (PHYEX)
+
+`GridTools/physics_patterns` PR #1 (Météo-France), from PHYEX
+`condensation.F90` (research §A.9). Today: Fortran k-loops — an argmin
+tracking `(ZTMIN, ITPL)` (minimum temperature and its level), then a
+mixing-length loop whose recurrence branch depends on the height of the
+per-column tropopause level `PZZ(JIJ, ITPL(JIJ))`.
+
+Proposed — the level search is a reduction (§3.9), the height lookup a
+computed-index gather (separate design discussion), the recurrence an
+ordinary scan with a data-dependent `where`:
+
+```python
+@gtx.scan(axis=KDim, forward=True)  # ground -> space
+def mixing_length_step(zl_below: float, zz: float, z_sfc: float, z_tpl: float) -> float:
+    zzz = zz - z_sfc
+    free_tropo = minimum(600.0, zzz)  # boundary-layer-limited length scale
+    return where(zzz > 0.9 * (z_tpl - z_sfc), 0.6 * zl_below, free_tropo)
+
+
+@gtx.field_operator
+def mixing_length(t: IJKF, zz: IJKF, z_sfc: IJF) -> IJKF:
+    itpl = gtx.argmin(t, axis=KDim)  # tropopause level: Field[[I, J], int32]
+    z_tpl = zz(gtx.as_index(KDim, itpl))  # height at that level: Field[[I, J], float]
+    return mixing_length_step(
+        zz, z_sfc, z_tpl, init=20.0, k_range=KDim[1:], include_initial=True
+    )  # ZL = 20 at the first level, emitted (§3.3 mechanism 2)
+```
+
+What disappeared: the in-carry `(t_min, k)` tracking with a hand-rolled
+level counter (the §A.7 `_compute_param` idiom) and a full-3D
+materialization for a column-constant quantity (`itpl`, `z_tpl` are
+k-less). What it needs: `argmin` (§3.9) and the `as_index` gather
+(separate design discussion; strawman spelling).
+
+## 9. Per-column variable-depth accumulation (Noah LSM)
+
+`GridTools/physics_patterns` PR #2 (NOAA), `lsm.py` (research §A.9): a
+k-loop running to a per-column depth `nroot` (root zone; the PBL variant
+varies at runtime), accumulating a k-less soil conductance. The trip count
+is data, so no anchored condition applies — the §4.8 answer is a masked
+full-range reduction, with the level index as a value (§3.9):
+
+```python
+@gtx.field_operator
+def soil_conductance(zsoil: IJKF, sh2o: IJKF, smcwlt: IJF, smcref: IJF, nroot: IJF_int) -> IJF:
+    gx = minimum(1.0, maximum(0.0, (sh2o - smcwlt) / (smcref - smcwlt)))
+    dz = concat_where(KDim == KDim.start, zsoil, zsoil - zsoil(Koff[-1]))
+    z_root = zsoil(gtx.as_index(KDim, nroot))  # computed-index gather again
+    return gtx.sum(where(gtx.index(KDim) < nroot, dz / z_root * gx, 0.0), axis=KDim)
+```
+
+One masked reduction instead of a triple loop; the per-column bound costs
+O(n_k) masked work instead of O(nroot) — the §4.8 vectorization trade.
+
+## 10. SHiELD melting during sedimentation: the scope boundary
+
+`GridTools/physics_patterns` PR #2 (NOAA), `microphysics.py` (research
+§A.9). Upward k-loop over ice source levels; for each k an inner downward
+m-loop melts and precipitates into the cells below, with two
+data-dependent `break`s, scatter writes at both k and m (`qice[k] -= …`,
+`qrain[m] += …`, temperature at both), and sequential feedback in both
+loops (`qice[k]` exhausted across the inner loop; `temperature[m]`
+updated and re-read by later k iterations).
+
+There is deliberately no "after" code: the order-dependent `min` caps read
+intermediate state, so no masked bounded-window gather computes the same
+answer — research §C.3's regime 3 *with feedback*, outside the proposed
+constructs (proposal §4.8). The options are algorithm reformulation (what
+COSMO's boxtracking did for the same physics, research §C.1) or — if such
+patterns accumulate during migration — revisiting the whole-column escape
+hatch (proposal §4.1, §4.8).
+
 ## Appendix: sedimentation reference implementations
 
 Transcribed from https://gist.github.com/havogt/c52d19f2f7557c2c048d12be7330bda8

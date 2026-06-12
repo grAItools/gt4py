@@ -267,6 +267,61 @@ range deduction (§3.1–§3.3, open question 9), `history` carries (§4.6), and
 the §3.5 library caveat. Worked transcription in the examples companion
 (§7).
 
+### A.9 Production evidence: GridTools `physics_patterns` (Météo-France, NOAA)
+
+The two open PRs in https://github.com/GridTools/physics_patterns (a
+repository collecting vertical physics patterns for exactly this design
+space) contribute three patterns and one boundary case.
+
+**PR #1 — Météo-France PHYEX `condensation.F90`** (tropopause inversion +
+mixing length):
+
+- *Tropopause level = argmin over K*: a k-loop tracking `(ZTMIN, ITPL)` —
+  the running minimum temperature plus its level index. As a scan: final
+  carry only, no per-level output (the fold form, proposal §3.1/§3.9),
+  and the body needs the level *index as a value* to store `ITPL = JK`
+  (today's workaround is the hand-rolled in-carry counter of §A.7's
+  `metric_fields.py::_compute_param`). As a builtin:
+  `argmin(t, axis=KDim)`.
+- *Gather at a computed K index*: the mixing-length condition reads
+  `PZZ(JIJ, ITPL(JIJ))` — the height at the per-column tropopause level.
+  Not a scan concern: an `as_index`-style computed-index gather
+  (field-valued connectivity, subject of a separate design discussion),
+  composing with the scan as a k-less input.
+- *Conditional recurrence*: `ZL(k) = 0.6·ZL(k−1)` above 0.9× tropopause
+  height, else `min(600, z − z_sfc)`, seeded with `ZL = 20` at the first
+  level — a clean slice-body scan (`where` with a data-dependent
+  per-column condition, init/`include_initial` seeding). Transcribes
+  without new machinery (examples §8). The runtime `IKL = ±1` level-order
+  genericity is a Fortran portability artifact; the DSL fixes the
+  ordering convention.
+
+**PR #2 — NOAA `lsm.py`** (Noah land-surface): a k-loop with per-column
+trip count (`for k in range(nroot[i, j])`; the PBL variant varies at
+runtime), accumulating a k-less soil conductance. The vectorized form is a
+full-range reduction masked by `k < nroot` — validating §4.8's
+masked-bound stance, but the mask compares the level index against a
+*field*, which anchored conditions (proposal §3.3) cannot express: it
+needs `gtx.index(KDim)` as a value (proposal §3.9). `zsoil` is again
+gathered at the computed index `nroot`.
+
+**PR #2 — NOAA `microphysics.py`** (SHiELD melting during sedimentation):
+the boundary case. Upward k-loop over ice source levels; per-k inner
+*downward* m-loop with two data-dependent `break`s; scatter writes at both
+k and m (`qice[k] -= …`, `qrain[m] += …`, temperature at both); and
+sequential feedback in *both* loops — `qice[k]` is exhausted across the
+inner loop and `temperature[m]` is updated and re-read by later k
+iterations. Strictly harder than the COSMO sedimentation of §C: the
+order-dependent `min` caps read intermediate state, so it is *not*
+reformulable as a masked bounded-window gather without changing the
+algorithm. Regime 3 of §C.3 *with feedback*; fed back into §4.8 as the
+documented scope boundary.
+
+Implications fed back into the proposal: P7 and §3.9 (vertical reductions,
+`argmin`, `gtx.index`, the fold form), §4.8 (scope boundary and the
+escape-hatch discussion), and the cross-reference to the computed-index
+gather design. Worked transcriptions in the examples companion (§8–§10).
+
 ## B. Prior art
 
 ### B.1 JAX
@@ -508,6 +563,47 @@ The synthesis adopted by the proposal: explicit init (row 2) for state
 seeding **plus** peel-guaranteed index conditionals (rows 1+4 combined) for
 differing first/last-level computations.
 
+### B.10 Reductions: prior art
+
+- **XLA `Reduce`**: arbitrary combine computation, but "the evaluation
+  order of the reduction function is arbitrary and may be
+  non-deterministic"; the function must tolerate reassociation. The order
+  freedom *is* the semantic payload distinguishing reduce from the
+  sequential while/scan. JAX accordingly exposes both tiers: `lax.scan`'s
+  final carry (order-pinned fold) and `lax.reduce`/`jnp.sum`
+  (reorderable).
+  https://openxla.org/xla/operation_semantics
+- **Futhark**: `reduce` requires associativity + a neutral element
+  (licensing parallel codegen); sequential recurrences use `loop` (§B.4).
+  Its compiler IR fuses the combined forms into **`screma`** — a
+  generalized scan-reduce-map second-order combinator with `redomap`
+  (map+reduce) and `scanomap` (map+scan) as special cases; the fusion
+  engine is built around it. The lesson for proposal §3.9: combined
+  scan+reduce is an IR/fusion concern, not a user-facing construct.
+  https://hackage.haskell.org/package/futhark-0.20.6/docs/Futhark-IR-SOACS-SOAC.html ,
+  https://dl.acm.org/doi/10.1145/2935323.2935326
+- **Array API standard**: *all* fixed-op reductions are standardized
+  (`sum`, `prod`, `min`, `max`, `argmin`, `argmax`, `any`, `all`) while no
+  general reduce/scan is — §B.2's finding seen from the other side.
+  Fixed-op vertical reductions therefore get a portable one-call embedded
+  lowering, unlike the general scan.
+  https://data-apis.org/array-api/latest/API_specification/statistical_functions.html
+- **NumPy** `sum` uses pairwise summation — even the reference array
+  library does not evaluate in index order; order-unspecified is the
+  ecosystem default for reductions.
+  https://numpy.org/doc/stable/reference/generated/numpy.sum.html
+- **GridTools 2** has no reduction construct at all; a column sum is a
+  FORWARD computation accumulating through a k-cache — i.e. compiled
+  backends lower a vertical reduce as a sequential k-accumulator in the
+  existing vertical executor, bit-reproducible by construction.
+  https://gridtools.github.io/gridtools/latest/user_manual/user_manual.html
+- **PSyclone/LFRic** treats reductions as first-class kernel metadata
+  (global sums, inner products) and offers a *reproducible* reduction mode
+  (padded per-thread partials) — evidence that the weather/climate
+  community demands an explicit reproducibility answer, which proposal
+  §3.9 gives as "write the fold".
+  https://psyclone.readthedocs.io/en/stable/dynamo0p3.html
+
 ## C. Case study: scan + sub-reduce in the vertical
 
 ### C.1 The COSMO/ICON two-moment sedimentation scheme
@@ -688,3 +784,6 @@ gist's `box_sedim_naive_func` with the window machinery absorbing
 | 14  | Surface diagnostics are final carries, today extracted by last-level program slicing                                                                | §A.7                                         | §3.1 `(final_carry, ys)` return                                         |
 | 15  | Production cartesian solves are pre-factored, stride-2, with multi-level end-anchored intervals; a textbook-Thomas library call doesn't cover them  | §A.8                                         | §3.3 anchors + partition guarantee; §3.5 caveat; §4.6 `history` carries |
 | 16  | Interval dispatch makes extents interval-local for free; conditionals-in-body must match this precision via guard refinement                        | §A.8, §A.6                                   | §3.1–§3.3 guard-refined extents; open question 9                        |
+| 17  | Column reductions (integrals, level searches, masked variable depth, column maxima) are real demand; today flag/counter carries or host NumPy       | §A.9, §A.7                                   | P7; §3.9 fixed-op reductions; `gtx.index`                               |
+| 18  | Ecosystem two-tier: order-unspecified fixed-op reduce + order-pinned sequential fold; combined scan+reduce is an IR/fusion concern (`screma`)       | §B.10                                        | §3.9; §3.1 fold form; §3.8 scan→reduce fusion                           |
+| 19  | Data-dependent scatter with feedback (SHiELD melting) exists in production; not window-reformulable — a documented scope boundary                   | §A.9                                         | §4.8; §4.1 escape-hatch discussion                                      |
