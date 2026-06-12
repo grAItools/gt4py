@@ -7,7 +7,10 @@
   icon4py muphys evidence, scan fusion)
 - **Companion document**: [scan-redesign-research.md](scan-redesign-research.md)
   (detailed analysis of the current implementation, prior art with sources, and
-  the scan + sub-reduce case study)
+  the scan + sub-reduce case study);
+  [scan-redesign-examples.md](scan-redesign-examples.md) (worked before/after
+  examples, including the muphys decomposition and the sedimentation
+  reference implementations)
 
 Why-statement: In the context of vertical recurrences in weather and climate
 models (vertical integrals, tridiagonal solvers, sedimentation), facing an
