@@ -827,6 +827,21 @@ class DataField(common.FieldBuiltinFuncRegistry, common.Field):
             )
         return self.asnumpy()[()]  # type: ignore[return-value]  # ensured by the 0-d check
 
+    def materialized(self) -> DataField:
+        """
+        Force evaluation into a buffer-backed field over this field's (finite) domain.
+
+        The explicit "force" found in delayed-evaluation array libraries (Repa's
+        ``computeS``, Dask's ``persist``, Accelerate's manifest arrays): bounds
+        re-evaluation of composed function data and pins down memory.
+        """
+        if isinstance(self._data, NdArrayFieldData):
+            return self
+        return DataField(
+            self.domain,
+            NdArrayFieldData(self.ndarray, tuple(r.start for r in self.domain.ranges)),
+        )
+
     # -- restriction --
 
     def restrict(self, index: common.AnyIndexSpec) -> DataField:

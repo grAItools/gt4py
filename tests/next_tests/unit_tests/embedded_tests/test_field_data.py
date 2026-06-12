@@ -249,6 +249,23 @@ def test_composed_pointwise_policy(monkeypatch):
     np.testing.assert_array_equal(shifted.asnumpy(), expected)
 
 
+def test_materialized_forces_into_buffer(monkeypatch):
+    monkeypatch.setattr(field_data, "EAGER_POINTWISE_ON_FINITE_DOMAINS", False)
+    a = np_field(np.arange(10.0), -3)
+    fn = DataField.from_function(lambda i: 100.0 + i, domain={I: None}, dtype=np.float64)
+
+    composed = (a + fn) * 2.0
+    assert isinstance(composed._data, FunctionFieldData)
+    forced = composed.materialized()
+    assert isinstance(forced._data, NdArrayFieldData)
+    assert forced.materialized() is forced  # idempotent
+    assert_fields_equal(forced, composed)
+
+    infinite = fn + fn
+    with pytest.raises(ValueError, match="non-finite"):
+        infinite.materialized()
+
+
 def test_truediv_dtype_on_lazy_path():
     f = DataField.from_function(lambda i: i, domain={I: None}, dtype=np.int64)
     result = f / 2
