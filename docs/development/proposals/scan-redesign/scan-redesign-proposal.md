@@ -670,6 +670,28 @@ scan-reduce-map, with `redomap`/`scanomap` as special cases) is the
 precedent (research §B.10); GTFN's `ScanExecution` (which already merges
 scans) grows reduce slots, DaCe adds loop-region accumulators.
 
+**Lowering reduce-then-broadcast (third row).** Two equivalent backend
+strategies for "reduce, then consume the total at every level". (a)
+*Materialize k-less*: the reduction pass accumulates in a register and
+writes a k-less temporary (or writes the output in the last-level
+interval); the consumer pass reads it broadcast — two column traversals,
+one 2D temporary, consumer direction free. (b) *Carry-propagate*: a
+second pass in the *opposite* direction starts where the reduction ended,
+so the total sits in the carry (register / flush k-cache) for its entire
+sweep; if the consumer fuses into that pass, the result is fully
+register-resident with zero extra storage — the classic
+forward-scan + backward-scan idiom of the cartesian world (where k-less
+outputs don't exist), now a backend peephole instead of user code. (b)
+wins only when the consumer runs, or can be flipped to run, opposite to
+the reduction; unfused it materializes a 3D temporary and loses to (a).
+This is not the opposing-direction fusion problem of open question 5 —
+the second pass is created *by* the backend within one lowering decision.
+(b) also serves as the bridge implementation for backends that cannot yet
+write k-less outputs from a column pass (GTFN's `ScanExecution` today
+writes per-level only): emit the total at every level and alias one
+level. Both strategies are sequential in k, so the reproducibility story
+is unchanged.
+
 ## 4. Discussion: decisions, pros and cons, alternatives
 
 ### 4.1 Body granularity: scalar vs level slice vs whole column
