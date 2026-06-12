@@ -53,6 +53,26 @@ The protocol is intentionally small. Operations needed by the field layer:
 - ``translate(offsets)`` -- precompose with a translation; backs O(1) cartesian shifts.
 - ``remap_axes(axis_map)`` -- transpose/insert value-broadcast axes; backs `broadcast`.
 
+The protocol exposes *evaluation primitives*, deliberately not the field operations
+themselves (no ``__add__`` etc. on the data): operations on the data would need a
+pairwise answer for every combination of data kinds (ndarray+function, lazy+piecewise,
+...) -- the N x N dispatch problem this refactoring is meant to remove from the
+`Field` level would reappear one level down. Instead, ``gather_values`` is the
+universal "call the field as a function at absolute coordinates" primitive, so any
+data kind combines with any other for free (e.g. `premap` of a function field through
+a neighbor table needs no function-field-specific code). Should a data kind ever be
+able to combine smarter than evaluate-and-apply (constant folding, fusion), an
+*optional* ``combine(op, *others)`` hook consulted before the generic path could be
+added -- there is no concrete case yet.
+
+In this model :class:`FunctionFieldData` is the semantic ground truth -- any data is
+behaviorally a function from coordinates to values -- and the other implementations
+are storage/performance specializations: a constant field is just a function ignoring
+its coordinates (:func:`constant_data` is a helper, not a class), buffers materialize
+as views instead of evaluating a closure, and :class:`LazyFieldData` adds memoization
+plus the retained knowledge "this *will be* a buffer" (needed for future capabilities
+a closure cannot answer: mutability, `__gt_buffer_info__`, zero-copy `ndarray`).
+
 Notable consequences observed while battle-testing (see
 ``tests/next_tests/unit_tests/embedded_tests/test_field_data.py``):
 
@@ -65,11 +85,11 @@ Notable consequences observed while battle-testing (see
   on finite ones, materializing eagerly into a buffer (today's `NdArrayField`
   behavior) is a one-line policy in the shared layer
   (`EAGER_POINTWISE_ON_FINITE_DOMAINS`), not something the data implementations
-  decide pairwise.
+  decide pairwise. Always-composing is correct but unmemoized: expression trees
+  re-evaluate on every access, hence eager is the default.
 - A lazy (deferred-materialization) field is just :class:`LazyFieldData` wrapping a
   factory; equivalently it could be a `FunctionFieldData` whose function is the
-  ndarray lookup (``lambda *coords: thunk().gather_values(coords, xp)``) -- the class
-  here only adds memoization and cheap structural ops that stay lazy.
+  ndarray lookup (``lambda *coords: thunk().gather_values(coords, xp)``).
 - `concat_where` with an infinite boundary-condition field produces a field on an
   infinite domain backed by :class:`PiecewiseFieldData`; this is not representable
   with today's `NdArrayField`.
