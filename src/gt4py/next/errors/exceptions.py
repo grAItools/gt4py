@@ -23,6 +23,8 @@ import difflib
 from typing import Any, ClassVar, Iterable, Optional, Sequence
 
 from gt4py.eve import SourceLocation
+
+# TODO(havogt): import 'Self' from 'typing' directly once the Python floor is >=3.12.
 from gt4py.eve.extended_typing import Self
 from gt4py.next.errors import formatting
 
@@ -89,6 +91,10 @@ class DSLError(GT4PyError):
         self.location = location
         return self
 
+    # TODO(havogt): on Python >=3.11 this shadows 'BaseException.add_note' (PEP 678);
+    #  on 3.10 it is a plain new method, so 'add_note' on GT4Py exceptions that are
+    #  not 'DSLError's raises 'AttributeError' on 3.10 but silently goes to
+    #  '__notes__' on 3.11+. Remove this caveat once the Python floor is >=3.12.
     def add_note(self, note: str) -> None:
         """
         Add a note to the diagnostic, using the standard 'BaseException.add_note' API.
